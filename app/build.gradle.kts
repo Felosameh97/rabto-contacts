@@ -160,7 +160,7 @@ tasks.withType<Test> {
   }
 }
 
-tasks.register("exportApkToRoot") {
+val exportApkToRoot = tasks.register("exportApkToRoot") {
   dependsOn("assembleDebug")
   val apkFile = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
   val outFile = rootProject.layout.projectDirectory.file("RabtaContacts.apk")
@@ -169,4 +169,8 @@ tasks.register("exportApkToRoot") {
   doLast {
     apkFile.get().asFile.copyTo(outFile.asFile, overwrite = true)
   }
+}
+
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+  finalizedBy(exportApkToRoot)
 }
