@@ -152,3 +152,14 @@ tasks.withType<Test> {
     events("passed", "failed", "skipped")
   }
 }
+
+tasks.register("exportApkToRoot") {
+  dependsOn("assembleDebug")
+  val apkFile = layout.buildDirectory.file("outputs/apk/debug/app-debug.apk")
+  val outFile = rootProject.layout.projectDirectory.file("RabtaContacts.apk")
+  inputs.file(apkFile)
+  outputs.file(outFile)
+  doLast {
+    apkFile.get().asFile.copyTo(outFile.asFile, overwrite = true)
+  }
+}

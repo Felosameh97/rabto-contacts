@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -142,6 +143,9 @@ class RabtaViewModel(
     private val _releaseInfo = MutableStateFlow<GitHubReleaseInfo?>(null)
     val releaseInfo = _releaseInfo.asStateFlow()
 
+    private val _autoUpdateRelease = MutableStateFlow<GitHubReleaseInfo?>(null)
+    val autoUpdateRelease = _autoUpdateRelease.asStateFlow()
+
     private val _pendingWhatsAppCapture = MutableStateFlow<ContactRecord?>(null)
     val pendingWhatsAppCapture = _pendingWhatsAppCapture.asStateFlow()
 
@@ -195,11 +199,26 @@ class RabtaViewModel(
                         }
                     }
             }
+            launch {
+                val savedRepo = prefs.githubRepoFlow.firstOrNull().orEmpty().trim()
+                if (savedRepo.isNotBlank()) {
+                    gitHubService.checkLatestRelease(savedRepo).onSuccess { info ->
+                        _releaseInfo.value = info
+                        if (info.isUpdateAvailable) {
+                            _autoUpdateRelease.value = info
+                        }
+                    }
+                }
+            }
         }
     }
 
     fun clearStatusMessage() {
         _statusMessage.value = null
+    }
+
+    fun dismissAutoUpdatePrompt() {
+        _autoUpdateRelease.value = null
     }
 
     fun clearPendingWhatsAppCapture() {

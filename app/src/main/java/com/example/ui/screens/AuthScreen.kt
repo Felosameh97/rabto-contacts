@@ -91,7 +91,7 @@ fun AuthScreen(
                 ) {
                     Box(modifier = Modifier.fillMaxWidth()) {
                         Image(
-                            painter = painterResource(id = R.drawable.img_hero_network),
+                            painter = painterResource(id = R.drawable.img_hero_network_1794840678255),
                             contentDescription = stringResource(id = R.string.app_name),
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
