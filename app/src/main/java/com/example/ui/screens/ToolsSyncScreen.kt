@@ -2,8 +2,12 @@ package com.example.ui.screens
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -79,6 +83,10 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.BuildConfig
 import com.example.R
+import com.example.auth.getAppCheckModeLabelAr
+import com.example.auth.getManualDebugToken
+import com.example.auth.getOrCreateLocalDebugUuid
+import com.example.auth.saveManualDebugToken
 import com.example.data.remote.GoogleDriveScanner
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
@@ -862,6 +870,95 @@ fun ToolsSyncScreen(
                                 ) {
                                     Text(if (releaseInfo.apkDownloadUrl != null) "تحميل RabtaContacts.apk" else "فتح صفحة المستودع")
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 5B: Firebase App Check & Gemini Diagnostics
+        item {
+            var manualTokenInput by remember { mutableStateOf(getManualDebugToken(context)) }
+            var showTokenConfig by remember { mutableStateOf(manualTokenInput.isNotBlank()) }
+            val localDebugUuid = remember { getOrCreateLocalDebugUuid(context) }
+
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            Text("حماية Gemini و App Check", style = MaterialTheme.typography.titleMedium)
+                        }
+                        TextButton(onClick = { showTokenConfig = !showTokenConfig }) {
+                            Text(if (showTokenConfig) "إخفاء" else "خيارات متقدمة")
+                        }
+                    }
+                    Text(
+                        "الوضع النشط: ${getAppCheckModeLabelAr()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    if (showTokenConfig) {
+                        Text(
+                            "في الأجهزة الحقيقية يعمل reCAPTCHA تلقائياً. إذا أردت ربط الجهاز يدوياً بـ Debug Token من Firebase Console يمكنك نسخه أو لصقه هنا ثم إعادة فتح التطبيق:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (localDebugUuid.isNotBlank()) {
+                            OutlinedButton(
+                                onClick = {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    cm.setPrimaryClip(ClipData.newPlainText("AppCheckDebugUUID", localDebugUuid))
+                                    Toast.makeText(context, "تم نسخ Debug UUID المحلي", Toast.LENGTH_SHORT).show()
+                                },
+                                modifier = Modifier.fillMaxWidth().testTag("copy_local_debug_uuid_btn"),
+                            ) {
+                                Text("نسخ Debug UUID الخاص بهذا الهاتف")
+                            }
+                        }
+                        OutlinedTextField(
+                            value = manualTokenInput,
+                            onValueChange = { manualTokenInput = it },
+                            label = { Text("Debug Token مخصص (اختياري)") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("manual_appcheck_token_input"),
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            Button(
+                                onClick = {
+                                    saveManualDebugToken(context, manualTokenInput)
+                                    Toast.makeText(
+                                        context,
+                                        "تم الحفظ. أغلق التطبيق وأعد فتحه لتطبيق الوضع الجديد.",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                },
+                                modifier = Modifier.weight(1f).testTag("save_manual_appcheck_btn"),
+                            ) {
+                                Text("حفظ التوكن")
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    manualTokenInput = ""
+                                    saveManualDebugToken(context, "")
+                                    Toast.makeText(
+                                        context,
+                                        "تم الترجيع إلى reCAPTCHA التلقائي. أعد فتح التطبيق.",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                },
+                                modifier = Modifier.weight(1f).testTag("clear_manual_appcheck_btn"),
+                            ) {
+                                Text("استخدام التلقائي")
                             }
                         }
                     }

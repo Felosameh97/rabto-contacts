@@ -174,7 +174,7 @@ class RabtaAiAssistant {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini command failed", e)
-            Result.failure(e)
+            Result.failure(formatAiError(e))
         }
     }
 
@@ -276,7 +276,7 @@ class RabtaAiAssistant {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini bilingual enrichment failed", e)
-            Result.failure(e)
+            Result.failure(formatAiError(e))
         }
     }
 
@@ -335,7 +335,7 @@ class RabtaAiAssistant {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini classify failed", e)
-            Result.failure(e)
+            Result.failure(formatAiError(e))
         }
     }
 
@@ -442,11 +442,24 @@ class RabtaAiAssistant {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini audio transcription failed", e)
-            Result.failure(e)
+            Result.failure(formatAiError(e))
         }
     }
 
     companion object {
+        private fun formatAiError(e: Exception): Exception {
+            val raw = e.localizedMessage ?: e.message.orEmpty()
+            val lower = raw.lowercase(Locale.US)
+            return if (lower.contains("app check") || lower.contains("token is invalid") || lower.contains("403")) {
+                IllegalStateException(
+                    "$raw\n\nتأكد من اتصال الإنترنت ووجود Google Play Services محدث على الجهاز، أو أدخل Debug Token مخصص من الإعدادات > حالة Gemini و App Check.",
+                    e,
+                )
+            } else {
+                e
+            }
+        }
+
         fun parseIsoDateToEpochMs(iso: String): Long? {
             if (iso.isBlank()) return null
             val patterns = listOf("yyyy-MM-dd HH:mm", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd")
