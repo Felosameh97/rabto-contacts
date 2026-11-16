@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Map
@@ -25,6 +27,7 @@ import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -57,6 +60,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.example.auth.authStateFlow
+import com.example.auth.configureAppCheck
 import com.example.data.device.CallLogReader
 import com.example.data.device.DeviceContactsManager
 import com.example.data.local.RabtaDatabase
@@ -64,8 +68,10 @@ import com.example.data.local.SyncPrefsDataStore
 import com.example.data.remote.FirestoreContactsRepository
 import com.example.data.remote.GitHubUpdateService
 import com.example.domain.model.ContactRecord
+import com.example.ui.components.AiAssistantSheet
 import com.example.ui.components.ContactDetailBottomSheet
 import com.example.ui.components.ContactEditorDialog
+import com.example.ui.components.DialpadSheet
 import com.example.ui.components.QrScannerDialog
 import com.example.ui.components.WhatsAppCaptureDialog
 import com.example.ui.screens.AuthScreen
@@ -73,9 +79,12 @@ import com.example.ui.screens.CategoriesScreen
 import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.MapScreen
 import com.example.ui.screens.ToolsSyncScreen
+import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.RabtaContactsTheme
+import com.example.ui.theme.ThemeMode
 import com.example.ui.viewmodel.RabtaViewModel
 import com.example.util.SystemIntents
+import com.example.widget.RabtaWidget
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
@@ -91,20 +100,35 @@ import kotlinx.serialization.Serializable
 class MainActivity : ComponentActivity() {
     private var incomingShareText by mutableStateOf<String?>(null)
     private var incomingVCardText by mutableStateOf<String?>(null)
+    private var requestedDialDigits by mutableStateOf<String?>(null)
+    private var requestedOpenDialpad by mutableStateOf(false)
+    private var requestedOpenAi by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // App Check MUST run before setContent, ViewModels, or any Firebase call
+        configureAppCheck(this, intent)
         enableEdgeToEdge()
         parseIncomingIntent(intent)
 
         setContent {
-            RabtaContactsTheme {
+            val prefs = remember { SyncPrefsDataStore(applicationContext) }
+            val themeMode by prefs.themeModeFlow.collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
+            val calmPalette by prefs.paletteFlow.collectAsStateWithLifecycle(initialValue = CalmPalette.SLATE)
+
+            RabtaContactsTheme(themeMode = themeMode, palette = calmPalette) {
                 RabtaRootApp(
                     incomingShareText = incomingShareText,
                     incomingVCardText = incomingVCardText,
+                    requestedDialDigits = requestedDialDigits,
+                    requestedOpenDialpad = requestedOpenDialpad,
+                    requestedOpenAi = requestedOpenAi,
                     onConsumeIncoming = {
                         incomingShareText = null
                         incomingVCardText = null
+                        requestedDialDigits = null
+                        requestedOpenDialpad = false
+                        requestedOpenAi = false
                     },
                 )
             }
@@ -120,6 +144,17 @@ class MainActivity : ComponentActivity() {
     private fun parseIncomingIntent(intent: Intent?) {
         if (intent == null) return
         when (intent.action) {
+            RabtaWidget.ACTION_OPEN_DIALPAD -> {
+                requestedOpenDialpad = true
+            }
+            RabtaWidget.ACTION_OPEN_AI -> {
+                requestedOpenAi = true
+            }
+            Intent.ACTION_DIAL -> {
+                val raw = intent.data?.schemeSpecificPart.orEmpty()
+                requestedDialDigits = raw
+                requestedOpenDialpad = true
+            }
             Intent.ACTION_SEND -> {
                 val type = intent.type.orEmpty()
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
@@ -132,7 +167,12 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_VIEW -> {
                 val data = intent.dataString
                 if (!data.isNullOrBlank() && (data.startsWith("tel:") || data.contains("wa.me"))) {
-                    incomingShareText = data
+                    if (data.startsWith("tel:")) {
+                        requestedDialDigits = data.removePrefix("tel:")
+                        requestedOpenDialpad = true
+                    } else {
+                        incomingShareText = data
+                    }
                 }
             }
         }
@@ -143,6 +183,9 @@ class MainActivity : ComponentActivity() {
 private fun RabtaRootApp(
     incomingShareText: String?,
     incomingVCardText: String?,
+    requestedDialDigits: String?,
+    requestedOpenDialpad: Boolean,
+    requestedOpenAi: Boolean,
     onConsumeIncoming: () -> Unit,
     auth: FirebaseAuth = Firebase.auth,
 ) {
@@ -156,6 +199,9 @@ private fun RabtaRootApp(
             user = user,
             incomingShareText = incomingShareText,
             incomingVCardText = incomingVCardText,
+            requestedDialDigits = requestedDialDigits,
+            requestedOpenDialpad = requestedOpenDialpad,
+            requestedOpenAi = requestedOpenAi,
             onConsumeIncoming = onConsumeIncoming,
             onSignOut = { auth.signOut() },
         )
@@ -168,6 +214,9 @@ private fun AuthenticatedMainScreen(
     user: FirebaseUser,
     incomingShareText: String?,
     incomingVCardText: String?,
+    requestedDialDigits: String?,
+    requestedOpenDialpad: Boolean,
+    requestedOpenAi: Boolean,
     onConsumeIncoming: () -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -195,13 +244,6 @@ private fun AuthenticatedMainScreen(
         },
     )
 
-    LaunchedEffect(incomingShareText, incomingVCardText) {
-        if (incomingShareText != null || incomingVCardText != null) {
-            viewModel.handleIncomingShareOrDeepLink(incomingShareText, incomingVCardText)
-            onConsumeIncoming()
-        }
-    }
-
     val context = LocalContext.current
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -211,6 +253,7 @@ private fun AuthenticatedMainScreen(
     val totalCount by viewModel.totalContactsCount.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val dialpadMatches by viewModel.dialpadMatches.collectAsStateWithLifecycle()
     val favorites by viewModel.favoriteContacts.collectAsStateWithLifecycle()
     val frequentCalls by viewModel.frequentCalls.collectAsStateWithLifecycle()
     val recentCalls by viewModel.recentCalls.collectAsStateWithLifecycle()
@@ -219,6 +262,7 @@ private fun AuthenticatedMainScreen(
     val recentLogs by viewModel.recentWhatsAppLogs.collectAsStateWithLifecycle()
     val bundledImported by viewModel.bundledImported.collectAsStateWithLifecycle()
     val importProgress by viewModel.importProgressText.collectAsStateWithLifecycle()
+    val cloudSyncStatus by viewModel.cloudSyncStatus.collectAsStateWithLifecycle()
     val currentCatPath by viewModel.currentCategoryPath.collectAsStateWithLifecycle()
     val childCategories by viewModel.childCategories.collectAsStateWithLifecycle()
     val categoryContacts by viewModel.categoryContacts.collectAsStateWithLifecycle()
@@ -230,6 +274,11 @@ private fun AuthenticatedMainScreen(
     val githubRepoSlug by viewModel.githubRepoSlug.collectAsStateWithLifecycle()
     val releaseInfo by viewModel.releaseInfo.collectAsStateWithLifecycle()
     val autoUpdateRelease by viewModel.autoUpdateRelease.collectAsStateWithLifecycle()
+    val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val calmPalette by viewModel.calmPalette.collectAsStateWithLifecycle()
+    val autoRecordCalls by viewModel.autoRecordCalls.collectAsStateWithLifecycle()
+    val callRecordings by viewModel.callRecordings.collectAsStateWithLifecycle()
+    val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val statusMsg by viewModel.statusMessage.collectAsStateWithLifecycle()
     val pendingWaCapture by viewModel.pendingWhatsAppCapture.collectAsStateWithLifecycle()
@@ -239,6 +288,23 @@ private fun AuthenticatedMainScreen(
     var showEditor by remember { mutableStateOf(false) }
     var showWaCapture by remember { mutableStateOf(false) }
     var showQrScanner by remember { mutableStateOf(false) }
+    var showDialpad by remember { mutableStateOf(false) }
+    var dialpadSeed by remember { mutableStateOf("") }
+    var showAiSheet by remember { mutableStateOf(false) }
+
+    LaunchedEffect(incomingShareText, incomingVCardText, requestedOpenDialpad, requestedOpenAi, requestedDialDigits) {
+        if (incomingShareText != null || incomingVCardText != null) {
+            viewModel.handleIncomingShareOrDeepLink(incomingShareText, incomingVCardText)
+            onConsumeIncoming()
+        } else if (requestedOpenDialpad) {
+            dialpadSeed = requestedDialDigits.orEmpty()
+            showDialpad = true
+            onConsumeIncoming()
+        } else if (requestedOpenAi) {
+            showAiSheet = true
+            onConsumeIncoming()
+        }
+    }
 
     LaunchedEffect(statusMsg) {
         statusMsg?.let {
@@ -262,6 +328,23 @@ private fun AuthenticatedMainScreen(
             topBar = {
                 CenterAlignedTopAppBar(
                     title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
+                    actions = {
+                        IconButton(
+                            onClick = {
+                                dialpadSeed = ""
+                                showDialpad = true
+                            },
+                            modifier = Modifier.testTag("topbar_dialpad_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Dialpad, contentDescription = stringResource(R.string.dialpad_title))
+                        }
+                        IconButton(
+                            onClick = { showAiSheet = true },
+                            modifier = Modifier.testTag("topbar_ai_btn"),
+                        ) {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = stringResource(R.string.ai_assistant_title))
+                        }
+                    },
                 )
             },
             bottomBar = {
@@ -341,9 +424,10 @@ private fun AuthenticatedMainScreen(
                                 weeklyLogs = weeklyLogs,
                                 bundledImported = bundledImported,
                                 importProgressText = importProgress,
+                                cloudSyncStatus = cloudSyncStatus,
                                 onSearchQueryChange = viewModel::updateSearchQuery,
                                 onOpenContact = viewModel::openContact,
-                                onWhatsApp = viewModel::launchWhatsAppAndLog,
+                                onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
                                 onAddContact = {
                                     editingContact = null
                                     editorCategorySeed = ""
@@ -354,6 +438,11 @@ private fun AuthenticatedMainScreen(
                                     navController.navigate(RouteCategories) { launchSingleTop = true }
                                 },
                                 onOpenQrScanner = { showQrScanner = true },
+                                onOpenDialpad = {
+                                    dialpadSeed = ""
+                                    showDialpad = true
+                                },
+                                onOpenAiAssistant = { showAiSheet = true },
                                 onImportBundledCsv = { viewModel.importBundledDatasets(uploadToCloud = true) },
                                 onSyncWeeklyWhatsApp = viewModel::syncWeeklyActiveWhatsAppToPhonebook,
                                 onPermissionsChanged = viewModel::refreshPermissionsState,
@@ -365,11 +454,17 @@ private fun AuthenticatedMainScreen(
                                 childCategories = childCategories,
                                 contactsInCategory = categoryContacts,
                                 selectedBulkIds = selectedBulk,
+                                isBusy = isBusy,
                                 onSelectPath = viewModel::loadCategoryLevel,
                                 onNavigateUp = viewModel::navigateCategoryUp,
                                 onCreateCategory = viewModel::createCategoryPath,
+                                onReorganizeCategories = viewModel::reorganizeAllCategories,
+                                onAiAutoCategorize = {
+                                    showAiSheet = true
+                                    viewModel.runAiAutoCategorizeBatch()
+                                },
                                 onOpenContact = viewModel::openContact,
-                                onWhatsApp = viewModel::launchWhatsAppAndLog,
+                                onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
                                 onAddContactInCategory = { catPath ->
                                     editingContact = null
                                     editorCategorySeed = catPath
@@ -395,8 +490,19 @@ private fun AuthenticatedMainScreen(
                                 paymentTemplates = paymentTemplates,
                                 githubRepoSlug = githubRepoSlug,
                                 releaseInfo = releaseInfo,
+                                themeMode = themeMode,
+                                calmPalette = calmPalette,
+                                autoRecordCalls = autoRecordCalls,
+                                callRecordings = callRecordings,
                                 isBusy = isBusy,
+                                onSetThemeMode = viewModel::setThemeMode,
+                                onSetCalmPalette = viewModel::setCalmPalette,
+                                onSetAutoRecordCalls = viewModel::setAutoRecordCalls,
+                                onDeleteRecording = viewModel::deleteRecording,
                                 onImportBundledCsv = { viewModel.importBundledDatasets(uploadToCloud = true) },
+                                onImportDevicePhonebook = { viewModel.importDevicePhonebookContacts(uploadToCloud = true) },
+                                onScanGoogleDrive = viewModel::scanGoogleDriveWithToken,
+                                onReorganizeCategories = viewModel::reorganizeAllCategories,
                                 onImportExternalFile = { uri, name -> viewModel.importFromUri(uri, name, true) },
                                 onPullFromCloud = viewModel::pullAllFromCloud,
                                 onShareExport = viewModel::shareBulkOrCategory,
@@ -428,9 +534,55 @@ private fun AuthenticatedMainScreen(
                 showEditor = true
             },
             onDelete = viewModel::deleteContact,
-            onWhatsApp = viewModel::launchWhatsAppAndLog,
+            onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
             onToggleDeviceSync = viewModel::toggleDeviceContactSync,
             onAddPaymentTemplate = viewModel::savePaymentTemplate,
+        )
+    }
+
+    if (showDialpad) {
+        DialpadSheet(
+            initialDigits = dialpadSeed,
+            matches = dialpadMatches,
+            onQueryChange = viewModel::searchForDialpad,
+            onDismiss = { showDialpad = false },
+            onOpenContact = {
+                showDialpad = false
+                viewModel.openContact(it)
+            },
+            onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
+            onSaveNewNumber = { num ->
+                showDialpad = false
+                editingContact = ContactRecord(primaryPhone = num, phones = listOf(num))
+                editorCategorySeed = ""
+                showEditor = true
+            },
+        )
+    }
+
+    if (showAiSheet) {
+        AiAssistantSheet(
+            uiState = aiUiState,
+            onRunCommand = { prompt ->
+                viewModel.runAiCommand(
+                    userPrompt = prompt,
+                    onNavigateToCategory = {
+                        showAiSheet = false
+                        navController.navigate(RouteCategories) { launchSingleTop = true }
+                    },
+                    onNavigateToMap = {
+                        showAiSheet = false
+                        navController.navigate(RouteMap) { launchSingleTop = true }
+                    },
+                )
+            },
+            onRunBatchCategorize = viewModel::runAiAutoCategorizeBatch,
+            onOpenContact = {
+                showAiSheet = false
+                viewModel.openContact(it)
+            },
+            onWhatsAppWithMsg = { c, p, msg -> viewModel.launchWhatsAppAndLog(c, p, msg) },
+            onDismiss = { showAiSheet = false },
         )
     }
 

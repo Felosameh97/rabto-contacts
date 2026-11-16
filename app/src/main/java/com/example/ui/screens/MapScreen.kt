@@ -85,7 +85,7 @@ fun MapScreen(
         MapView(context).apply {
             setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
-            controller.setZoom(11.8)
+            controller.setZoom(11.5)
             controller.setCenter(GeoPoint(centerLat, centerLng))
         }
     }
@@ -122,8 +122,18 @@ fun MapScreen(
             .sortedBy { it.second }
     }
 
+    val markersSignature = remember(sortedNearby, selectedDistrict) {
+        "${selectedDistrict.orEmpty()}_${sortedNearby.size}_${sortedNearby.take(15).joinToString(",") { it.first.id }}"
+    }
+
+    val availableDistricts = remember(geoContacts) {
+        val counts = geoContacts.mapNotNull { it.district }.groupingBy { it }.eachCount()
+        EgyptGeoLookup.knownDistricts.filter { (counts[it.key] ?: 0) > 0 }
+            .sortedByDescending { counts[it.key] ?: 0 }
+            .ifEmpty { EgyptGeoLookup.knownDistricts.take(12) }
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
-        // District quick jump chips + My Location button
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -164,7 +174,7 @@ fun MapScreen(
                 onClick = { selectedDistrict = null },
                 label = { Text("الكل (${geoContacts.size})") },
             )
-            EgyptGeoLookup.knownDistricts.take(10).forEach { dist ->
+            availableDistricts.take(18).forEach { dist ->
                 FilterChip(
                     selected = selectedDistrict == dist.key,
                     onClick = {
@@ -172,14 +182,14 @@ fun MapScreen(
                         centerLat = dist.lat
                         centerLng = dist.lng
                         mapView.controller.animateTo(GeoPoint(dist.lat, dist.lng))
-                        mapView.controller.setZoom(13.5)
+                        mapView.controller.setZoom(13.2)
                     },
                     label = { Text(dist.key) },
                 )
             }
         }
 
-        // Interactive OSMDroid Map with Contact Dots/Markers
+        // Interactive OSMDroid Map guarded against redundant marker rebuilds
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -190,23 +200,30 @@ fun MapScreen(
             AndroidView(
                 factory = { mapView },
                 update = { view ->
-                    view.overlays.clear()
-                    sortedNearby.take(200).forEach { (contact, distKm) ->
-                        val lat = contact.latitude ?: return@forEach
-                        val lng = contact.longitude ?: return@forEach
-                        val marker = Marker(view).apply {
-                            position = GeoPoint(lat, lng)
-                            title = contact.displayName
-                            snippet = "${contact.primaryPhone} • ${String.format("%.1f كم", distKm)}"
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-                            setOnMarkerClickListener { _, _ ->
-                                onOpenContact(contact)
-                                true
+                    if (view.tag != markersSignature) {
+                        view.tag = markersSignature
+                        view.overlays.clear()
+                        sortedNearby.take(250).forEach { (contact, distKm) ->
+                            val lat = contact.latitude ?: return@forEach
+                            val lng = contact.longitude ?: return@forEach
+                            // Subtle deterministic jitter so pins in the same district don't overlap on 1 dot
+                            val hash = contact.id.hashCode()
+                            val latOffset = ((hash and 0xF) - 7) * 0.00055
+                            val lngOffset = (((hash ushr 4) and 0xF) - 7) * 0.00055
+                            val marker = Marker(view).apply {
+                                position = GeoPoint(lat + latOffset, lng + lngOffset)
+                                title = contact.displayName
+                                snippet = "${contact.primaryPhone} • ${String.format("%.1f كم", distKm)}"
+                                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                                setOnMarkerClickListener { _, _ ->
+                                    onOpenContact(contact)
+                                    true
+                                }
                             }
+                            view.overlays.add(marker)
                         }
-                        view.overlays.add(marker)
+                        view.invalidate()
                     }
-                    view.invalidate()
                 },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -249,7 +266,7 @@ fun MapScreen(
                         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text("لا توجد جهات اتصال بإحداثيات في هذا النطاق", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "أضف المنطقة أو العنوان أو الإحداثيات لأي جهة اتصال (مثل المطرية، المرج، مدينة نصر) لتظهر تلقائياً كنقط على الخريطة.",
+                                "اضغط 'تنظيم ذكي' في الفئات لاستنتاج المواقع تلقائياً من المحافظات والمناطق وأكواد الخطوط الأرضية، أو أضف المنطقة يدوياً.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -257,7 +274,7 @@ fun MapScreen(
                     }
                 }
             } else {
-                items(sortedNearby.take(60), key = { it.first.id }) { (contact, distKm) ->
+                items(sortedNearby.take(80), key = { it.first.id }) { (contact, distKm) ->
                     Card(
                         shape = RoundedCornerShape(14.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),

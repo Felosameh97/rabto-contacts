@@ -1,10 +1,23 @@
 package com.example.data.local
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
+import com.example.util.PhoneUtils
 import kotlinx.coroutines.flow.Flow
+
+data class CategoryCountTuple(
+    val categoryPath: String,
+    val cnt: Int,
+)
+
+data class PhoneLookupMatch(
+    val phoneKey: String,
+    @Embedded val contact: ContactEntity,
+)
 
 @Dao
 interface ContactDao {
@@ -15,8 +28,14 @@ interface ContactDao {
     @Query("SELECT COUNT(*) FROM contacts")
     suspend fun getTotalCount(): Int
 
-    @Query("SELECT * FROM contacts WHERE isFavorite = 1 ORDER BY displayName ASC LIMIT 30")
+    @Query("SELECT * FROM contacts WHERE isFavorite = 1 ORDER BY displayName ASC LIMIT 40")
     fun observeFavorites(): Flow<List<ContactEntity>>
+
+    @Query("SELECT * FROM contacts WHERE isFavorite = 1 ORDER BY displayName ASC LIMIT :limit")
+    suspend fun getFavoritesOnce(limit: Int = 8): List<ContactEntity>
+
+    @Query("SELECT * FROM contacts ORDER BY updatedAtEpochMs DESC LIMIT :limit OFFSET :offset")
+    suspend fun getRecentOrAllPage(limit: Int = 200, offset: Int = 0): List<ContactEntity>
 
     @Query("SELECT * FROM contacts WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): ContactEntity?
@@ -33,35 +52,60 @@ interface ContactDao {
         LIMIT :limit OFFSET :offset
         """
     )
-    suspend fun searchContacts(query: String, limit: Int = 60, offset: Int = 0): List<ContactEntity>
+    suspend fun searchContacts(query: String, limit: Int = 80, offset: Int = 0): List<ContactEntity>
 
     @Query(
         """
-        SELECT * FROM contacts
-        WHERE categoryPathsFlat LIKE '%' || :categoryPath || '%'
-        ORDER BY isFavorite DESC, displayName ASC
+        SELECT c.* FROM contacts c
+        INNER JOIN contact_categories cc ON c.id = cc.contactId
+        WHERE cc.categoryPath = :categoryPath
+        ORDER BY c.isFavorite DESC, c.displayName ASC
         LIMIT :limit OFFSET :offset
         """
     )
-    suspend fun getByCategoryPath(categoryPath: String, limit: Int = 80, offset: Int = 0): List<ContactEntity>
+    suspend fun getByCategoryPath(categoryPath: String, limit: Int = 120, offset: Int = 0): List<ContactEntity>
 
-    @Query("SELECT COUNT(*) FROM contacts WHERE categoryPathsFlat LIKE '%' || :categoryPath || '%'")
-    suspend fun countByCategoryPath(categoryPath: String): Int
+    @Query("SELECT categoryPath, COUNT(*) AS cnt FROM contact_categories WHERE categoryPath IN (:paths) GROUP BY categoryPath")
+    suspend fun countForCategoryPaths(paths: List<String>): List<CategoryCountTuple>
 
-    @Query("SELECT * FROM contacts WHERE latitude IS NOT NULL AND longitude IS NOT NULL LIMIT 500")
+    @Query("SELECT * FROM contacts WHERE latitude IS NOT NULL AND longitude IS NOT NULL ORDER BY updatedAtEpochMs DESC LIMIT 2000")
     fun observeGeoContacts(): Flow<List<ContactEntity>>
 
     @Query("SELECT * FROM contacts WHERE syncedToDevice = 1 ORDER BY displayName ASC")
     fun observeSyncedContacts(): Flow<List<ContactEntity>>
 
-    @Query("SELECT * FROM contacts WHERE primaryPhone LIKE '%' || :suffix OR phonesJoined LIKE '%' || :suffix || '%' LIMIT 1")
-    suspend fun findByPhoneSuffix(suffix: String): ContactEntity?
+    @Query("SELECT c.* FROM phone_lookup p INNER JOIN contacts c ON p.contactId = c.id WHERE p.phoneKey = :phoneKey LIMIT 1")
+    suspend fun findByExactPhoneKey(phoneKey: String): ContactEntity?
+
+    @Query("SELECT p.phoneKey, c.* FROM phone_lookup p INNER JOIN contacts c ON p.contactId = c.id WHERE p.phoneKey IN (:phoneKeys)")
+    suspend fun findAllByPhoneKeys(phoneKeys: List<String>): List<PhoneLookupMatch>
+
+    @Query("SELECT * FROM contacts WHERE categoryPathsFlat LIKE '%جهات اتصال تلقائية%' OR categoryPathsFlat = '' LIMIT :limit")
+    suspend fun getAutoOrUnclassifiedContacts(limit: Int = 120): List<ContactEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<ContactEntity>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: ContactEntity)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertCategoryRefs(refs: List<ContactCategoryCrossRef>)
+
+    @Query("DELETE FROM contact_categories WHERE contactId = :contactId")
+    suspend fun deleteCategoryRefsForContact(contactId: String)
+
+    @Query("DELETE FROM contact_categories")
+    suspend fun clearCategoryRefs()
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertPhoneKeys(keys: List<PhoneLookupEntity>)
+
+    @Query("DELETE FROM phone_lookup WHERE contactId = :contactId")
+    suspend fun deletePhoneKeysForContact(contactId: String)
+
+    @Query("DELETE FROM phone_lookup")
+    suspend fun clearPhoneKeys()
 
     @Query("DELETE FROM contacts WHERE id = :id")
     suspend fun deleteById(id: String)
@@ -72,11 +116,78 @@ interface ContactDao {
     @Query("UPDATE contacts SET isFavorite = :favorite WHERE id = :id")
     suspend fun updateFavoriteFlag(id: String, favorite: Boolean)
 
-    @Query("SELECT categoryPathsFlat FROM contacts WHERE categoryPathsFlat != ''")
-    suspend fun getAllCategoryStrings(): List<String>
-
     @Query("DELETE FROM contacts")
     suspend fun clearAll()
+
+    @Transaction
+    suspend fun upsertBatchWithIndexes(
+        contacts: List<ContactEntity>,
+        catEntities: List<CategoryEntity>,
+        categoryDao: CategoryDao,
+    ) {
+        val catRefs = ArrayList<ContactCategoryCrossRef>(contacts.size * 2)
+        val phoneRefs = ArrayList<PhoneLookupEntity>(contacts.size)
+
+        for (c in contacts) {
+            val cats = c.categoryPathsFlat.split("\u001F").filter { it.isNotBlank() }
+            for (fullPath in cats) {
+                val parts = fullPath.split(">").map { it.trim() }.filter { it.isNotBlank() }
+                var accum = ""
+                for (part in parts) {
+                    accum = if (accum.isEmpty()) part else "$accum > $part"
+                    catRefs += ContactCategoryCrossRef(c.id, accum)
+                }
+            }
+            val phones = c.phonesJoined.split("\u001F").filter { it.isNotBlank() }
+            for (p in phones) {
+                val key = PhoneUtils.phoneSearchKey(p)
+                if (key.length >= 4) {
+                    phoneRefs += PhoneLookupEntity(key, c.id)
+                }
+            }
+        }
+
+        contacts.chunked(500).forEach { upsertAll(it) }
+        catRefs.chunked(900).forEach { insertCategoryRefs(it) }
+        phoneRefs.chunked(900).forEach { insertPhoneKeys(it) }
+        if (catEntities.isNotEmpty()) {
+            catEntities.chunked(500).forEach { categoryDao.upsertAll(it) }
+        }
+    }
+
+    @Transaction
+    suspend fun upsertSingleWithIndexes(contact: ContactEntity) {
+        upsert(contact)
+        deleteCategoryRefsForContact(contact.id)
+        deletePhoneKeysForContact(contact.id)
+
+        val catRefs = ArrayList<ContactCategoryCrossRef>()
+        val cats = contact.categoryPathsFlat.split("\u001F").filter { it.isNotBlank() }
+        for (fullPath in cats) {
+            val parts = fullPath.split(">").map { it.trim() }.filter { it.isNotBlank() }
+            var accum = ""
+            for (part in parts) {
+                accum = if (accum.isEmpty()) part else "$accum > $part"
+                catRefs += ContactCategoryCrossRef(contact.id, accum)
+            }
+        }
+        if (catRefs.isNotEmpty()) insertCategoryRefs(catRefs)
+
+        val phoneRefs = contact.phonesJoined.split("\u001F")
+            .filter { it.isNotBlank() }
+            .mapNotNull { p ->
+                val key = PhoneUtils.phoneSearchKey(p)
+                if (key.length >= 4) PhoneLookupEntity(key, contact.id) else null
+            }
+        if (phoneRefs.isNotEmpty()) insertPhoneKeys(phoneRefs)
+    }
+
+    @Transaction
+    suspend fun deleteContactWithIndexes(contactId: String) {
+        deleteCategoryRefsForContact(contactId)
+        deletePhoneKeysForContact(contactId)
+        deleteById(contactId)
+    }
 }
 
 @Dao
@@ -95,6 +206,9 @@ interface CategoryDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: CategoryEntity)
+
+    @Query("DELETE FROM categories")
+    suspend fun clearAll()
 
     @Query("DELETE FROM categories WHERE fullPath = :fullPath OR fullPath LIKE :fullPath || ' > %'")
     suspend fun deleteSubtree(fullPath: String)

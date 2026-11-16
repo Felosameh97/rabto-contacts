@@ -8,14 +8,20 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
-    <!-- Call Log & Selective Phonebook Sync -->
+    <!-- Dialer, Call Log, Audio Recording & Selective Phonebook Sync -->
+    <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- QR Scanner Camera -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <!-- Targeted package visibility for Play Compliance (no QUERY_ALL_PACKAGES) -->
     <queries>
@@ -24,8 +30,18 @@
         <package android:name="org.telegram.messenger" />
         <package android:name="org.telegram.plus" />
         <package android:name="com.google.android.apps.maps" />
+        <package android:name="com.orange.orangecash" />
+        <package android:name="com.orange.myorange.egypt" />
+        <package android:name="com.egyptianbanks.instapay" />
+        <package android:name="com.emeint.android.myservices" />
+        <package android:name="com.etisalat.etisalatcash" />
+        <package android:name="com.axispay.wallet" />
         <intent>
             <action android:name="android.intent.action.DIAL" />
+            <data android:scheme="tel" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.CALL" />
             <data android:scheme="tel" />
         </intent>
         <intent>
@@ -59,6 +75,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Eligible Default Phone/Dialer handler -->
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.DIAL" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="tel" />
+            </intent-filter>
+
             <!-- Capture text / phone / vCard shared from WhatsApp or other apps -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
@@ -71,7 +98,7 @@
                 <data android:mimeType="text/x-vcard" />
             </intent-filter>
 
-            <!-- Capture WhatsApp / tel / vcf links -->
+            <!-- Capture WhatsApp / tel links -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -79,6 +106,40 @@
                 <data android:scheme="tel" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".telecom.InCallActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.MyApplication" />
+
+        <service
+            android:name=".telecom.RabtaInCallService"
+            android:exported="true"
+            android:permission="android.permission.BIND_INCALL_SERVICE">
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_UI"
+                android:value="true" />
+            <meta-data
+                android:name="android.telecom.IN_CALL_SERVICE_RINGING"
+                android:value="true" />
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".widget.RabtaWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/rabta_widget_info" />
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"

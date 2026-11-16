@@ -44,6 +44,8 @@ kotlinxSerializationJson = "1.8.0"
 zxingCore = "3.5.3"
 osmdroid = "6.1.20"
 kotlinTest = "2.2.10"
+glanceAppwidget = "1.1.1"
+playServicesAuth = "21.3.0"
 
 
 [libraries]
@@ -102,6 +104,9 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 osmdroid-android = { group = "org.osmdroid", name = "osmdroid-android", version.ref = "osmdroid" }
 kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.ref = "kotlinTest" }
+androidx-glance-appwidget = { group = "androidx.glance", name = "glance-appwidget", version.ref = "glanceAppwidget" }
+androidx-glance-material3 = { group = "androidx.glance", name = "glance-material3", version.ref = "glanceAppwidget" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 
 
 [plugins]

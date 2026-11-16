@@ -7,6 +7,7 @@ import android.provider.CallLog
 import androidx.core.content.ContextCompat
 import com.example.data.local.ContactDao
 import com.example.domain.model.CallLogEntry
+import com.example.domain.model.ContactRecord
 import com.example.util.PhoneUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -70,21 +71,29 @@ class CallLogReader(
 
             if (entries.isEmpty()) return@withContext emptyList<CallLogEntry>() to emptyList()
 
-            // Group by normalized key to find frequent callers and enrich with Room contact matches
+            // Group by normalized key first
             val grouped = linkedMapOf<String, MutableList<CallLogEntry>>()
             for (e in entries) {
                 val key = PhoneUtils.phoneSearchKey(e.number).ifBlank { e.number }
                 grouped.getOrPut(key) { mutableListOf() }.add(e)
             }
 
+            // Single indexed batch query instead of 100+ LIKE scans
+            val validKeys = grouped.keys.filter { it.length >= 4 }.distinct()
+            val matchedByKey = mutableMapOf<String, ContactRecord>()
+            for (chunk in validKeys.chunked(400)) {
+                val matches = contactDao.findAllByPhoneKeys(chunk)
+                for (m in matches) {
+                    matchedByKey.putIfAbsent(m.phoneKey, m.contact.toDomain())
+                }
+            }
+
             val enrichedByKey = mutableMapOf<String, CallLogEntry>()
             for ((key, list) in grouped) {
                 val latest = list.first()
-                val suffix = PhoneUtils.phoneSearchKey(latest.number)
-                val matched = if (suffix.length >= 6) contactDao.findByPhoneSuffix(suffix)?.toDomain() else null
                 enrichedByKey[key] = latest.copy(
                     callCount = list.size,
-                    matchedContact = matched,
+                    matchedContact = matchedByKey[key],
                 )
             }
 
@@ -94,8 +103,7 @@ class CallLogReader(
 
             val recent = entries.take(20).map { entry ->
                 val key = PhoneUtils.phoneSearchKey(entry.number).ifBlank { entry.number }
-                val matched = enrichedByKey[key]?.matchedContact
-                entry.copy(matchedContact = matched)
+                entry.copy(matchedContact = enrichedByKey[key]?.matchedContact)
             }
 
             frequent to recent

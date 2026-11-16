@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
@@ -34,10 +36,12 @@ import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LocationOn
+import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.QrCode2
@@ -62,9 +66,12 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -77,6 +84,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.ContactRecord
@@ -102,98 +110,158 @@ fun ContactSummaryCard(
     onToggleSelect: () -> Unit = {},
 ) {
     val primary = contact.primaryPhone.ifBlank { contact.phones.firstOrNull().orEmpty() }
-    Card(
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable { if (bulkMode) onToggleSelect() else onClick() }
-            .testTag("contact_card_${contact.id}"),
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (bulkMode) {
-                Checkbox(
-                    checked = isSelected,
-                    onCheckedChange = { onToggleSelect() },
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(46.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontWeight = FontWeight.Bold,
-                    )
+    val canSwipeCall = primary.isNotBlank() && !bulkMode
+    val canSwipeWa = canSwipeCall && !PhoneUtils.isUssdOrShortCode(primary)
+
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    if (canSwipeCall) onCall(primary)
+                    false
+                }
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (canSwipeWa) onWhatsApp(primary)
+                    false
+                }
+                SwipeToDismissBoxValue.Settled -> false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = canSwipeCall,
+        enableDismissFromEndToStart = canSwipeWa,
+        backgroundContent = {
+            val dir = dismissState.dismissDirection
+            val bgColor = when (dir) {
+                SwipeToDismissBoxValue.StartToEnd -> MaterialTheme.colorScheme.primaryContainer
+                SwipeToDismissBoxValue.EndToStart -> WhatsAppGreen.copy(alpha = 0.22f)
+                SwipeToDismissBoxValue.Settled -> MaterialTheme.colorScheme.surface
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(bgColor)
+                    .padding(horizontal = 20.dp),
+            ) {
+                if (dir == SwipeToDismissBoxValue.StartToEnd) {
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterStart),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(Icons.Rounded.Call, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("اتصال سريع", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    }
+                } else if (dir == SwipeToDismissBoxValue.EndToStart) {
+                    Row(
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text("واتساب", style = MaterialTheme.typography.labelLarge, color = WhatsAppGreen)
+                        Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen)
+                    }
                 }
             }
-
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = contact.displayName,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+        },
+    ) {
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { if (bulkMode) onToggleSelect() else onClick() }
+                .testTag("contact_card_${contact.id}"),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (bulkMode) {
+                    Checkbox(
+                        checked = isSelected,
+                        onCheckedChange = { onToggleSelect() },
                     )
-                    if (contact.syncedToDevice) {
-                        Icon(
-                            imageVector = Icons.Rounded.PhoneAndroid,
-                            contentDescription = "محفوظ بالهاتف",
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(16.dp),
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            fontWeight = FontWeight.Bold,
                         )
                     }
                 }
-                if (primary.isNotBlank()) {
-                    Text(
-                        text = primary,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                    )
-                }
-                val subtitle = listOfNotNull(
-                    contact.categoryPaths.firstOrNull(),
-                    contact.district,
-                    contact.emails.firstOrNull(),
-                ).firstOrNull()
-                if (!subtitle.isNullOrBlank()) {
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
 
-            if (primary.isNotBlank()) {
-                FilledTonalIconButton(
-                    onClick = { onCall(primary) },
-                    modifier = Modifier.size(44.dp).testTag("quick_call_${contact.id}"),
-                ) {
-                    Icon(Icons.Rounded.Call, contentDescription = "اتصال")
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            text = contact.displayName,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        if (contact.syncedToDevice) {
+                            Icon(
+                                imageVector = Icons.Rounded.PhoneAndroid,
+                                contentDescription = "محفوظ بالهاتف",
+                                tint = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                    if (primary.isNotBlank()) {
+                        Text(
+                            text = primary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
+                    }
+                    val subtitle = listOfNotNull(
+                        contact.categoryPaths.firstOrNull(),
+                        contact.district,
+                        contact.emails.firstOrNull(),
+                    ).firstOrNull()
+                    if (!subtitle.isNullOrBlank()) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-                if (!PhoneUtils.isUssdOrShortCode(primary)) {
+
+                if (primary.isNotBlank()) {
                     FilledTonalIconButton(
-                        onClick = { onWhatsApp(primary) },
-                        modifier = Modifier.size(44.dp).testTag("quick_wa_${contact.id}"),
+                        onClick = { onCall(primary) },
+                        modifier = Modifier.size(44.dp).testTag("quick_call_${contact.id}"),
                     ) {
-                        Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen)
+                        Icon(Icons.Rounded.Call, contentDescription = "اتصال")
+                    }
+                    if (!PhoneUtils.isUssdOrShortCode(primary)) {
+                        FilledTonalIconButton(
+                            onClick = { onWhatsApp(primary) },
+                            modifier = Modifier.size(44.dp).testTag("quick_wa_${contact.id}"),
+                        ) {
+                            Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen)
+                        }
                     }
                 }
             }
@@ -217,8 +285,10 @@ fun ContactDetailBottomSheet(
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showQrDialog by remember { mutableStateOf(false) }
+    var showMeezaQrDialog by remember { mutableStateOf(false) }
     var showAddPaymentDialog by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var paymentAmount by remember { mutableStateOf("") }
 
     val allPhones = remember(contact) {
         (listOf(contact.primaryPhone) + contact.phones).filter { it.isNotBlank() }.distinct()
@@ -278,7 +348,6 @@ fun ContactDetailBottomSheet(
                 }
             }
 
-            // Categories
             if (contact.categoryPaths.isNotEmpty()) {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     contact.categoryPaths.forEach { cat ->
@@ -391,7 +460,7 @@ fun ContactDetailBottomSheet(
                 }
             }
 
-            // Payment Links Concatenation Section
+            // Dual Payment Section: Option 1 (USSD Codes) + Option 2 (Direct Apps & Meeza QR)
             if (allPhones.isNotEmpty()) {
                 HorizontalDivider()
                 Row(
@@ -399,13 +468,14 @@ fun ContactDetailBottomSheet(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Text("خدمات الدفع والتحويل السريع", style = MaterialTheme.typography.titleSmall, color = InstaPayPurple)
+                    Text("الدفع والتحويل (كود اتصال + تطبيقات)", style = MaterialTheme.typography.titleSmall, color = InstaPayPurple)
                     TextButton(onClick = { showAddPaymentDialog = true }) {
                         Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
-                        Text("إضافة خدمة")
+                        Text("إضافة")
                     }
                 }
+
                 if (allPhones.size > 1) {
                     Row(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
@@ -424,36 +494,59 @@ fun ContactDetailBottomSheet(
                 }
 
                 val targetPhone = selectedPaymentPhone.ifBlank { allPhones.first() }
-                paymentTemplates.forEach { tpl ->
-                    val builtUrl = PaymentUtils.buildPaymentUrl(tpl.urlTemplate, targetPhone)
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainer,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { SystemIntents.openWebsiteOrPayment(context, builtUrl) }
-                            .testTag("payment_tpl_${tpl.id}"),
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedTextField(
+                        value = paymentAmount,
+                        onValueChange = { paymentAmount = it.filter { ch -> ch.isDigit() || ch == '.' } },
+                        label = { Text("المبلغ (اختياري)") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    FilledTonalButton(
+                        onClick = { showMeezaQrDialog = true },
+                        modifier = Modifier.height(54.dp).testTag("payment_meeza_qr_btn"),
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        ) {
-                            Icon(Icons.Rounded.Payments, contentDescription = null, tint = InstaPayPurple)
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(tpl.name, style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    builtUrl,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                            IconButton(onClick = { copyToClipboard(context, builtUrl) }) {
-                                Icon(Icons.Rounded.ContentCopy, contentDescription = "نسخ الرابط", modifier = Modifier.size(18.dp))
-                            }
-                        }
+                        Icon(Icons.Rounded.QrCode2, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("QR ميزة")
+                    }
+                }
+
+                val ussdTemplates = paymentTemplates.filter { it.urlTemplate.startsWith("tel:", ignoreCase = true) }
+                val appTemplates = paymentTemplates.filter { !it.urlTemplate.startsWith("tel:", ignoreCase = true) }
+
+                if (ussdTemplates.isNotEmpty()) {
+                    Text("الخيار 1: أكواد اتصال USSD مباشرة", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    ussdTemplates.forEach { tpl ->
+                        val builtUrl = PaymentUtils.buildPaymentUrl(tpl.urlTemplate, targetPhone, paymentAmount)
+                        PaymentActionRow(
+                            title = tpl.name,
+                            subtitle = builtUrl.removePrefix("tel:").replace("%23", "#"),
+                            icon = Icons.Rounded.Dialpad,
+                            onLaunch = { SystemIntents.openWebsiteOrPayment(context, builtUrl, targetPhone) },
+                            onCopy = { copyToClipboard(context, builtUrl.removePrefix("tel:").replace("%23", "#")) },
+                            tag = "payment_tpl_${tpl.id}",
+                        )
+                    }
+                }
+
+                if (appTemplates.isNotEmpty()) {
+                    Text("الخيار 2: فتح تطبيقات المحافظ (مع نسخ الرقم تلقائياً)", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    appTemplates.forEach { tpl ->
+                        val builtUrl = PaymentUtils.buildPaymentUrl(tpl.urlTemplate, targetPhone, paymentAmount)
+                        PaymentActionRow(
+                            title = tpl.name,
+                            subtitle = "ينسخ ${PhoneUtils.toLocalEgyptianPhone(targetPhone)} ويفتح التطبيق مباشرة",
+                            icon = Icons.Rounded.OpenInNew,
+                            onLaunch = { SystemIntents.openWebsiteOrPayment(context, builtUrl, targetPhone) },
+                            onCopy = { copyToClipboard(context, PhoneUtils.toLocalEgyptianPhone(targetPhone)) },
+                            tag = "payment_tpl_${tpl.id}",
+                        )
                     }
                 }
             }
@@ -474,7 +567,6 @@ fun ContactDetailBottomSheet(
                 }
             }
 
-            // Selective Device Contacts Sync + Share + Edit + Delete
             HorizontalDivider()
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -534,6 +626,16 @@ fun ContactDetailBottomSheet(
         ContactQrDialog(contact = contact, onDismiss = { showQrDialog = false })
     }
 
+    if (showMeezaQrDialog) {
+        val targetPhone = selectedPaymentPhone.ifBlank { allPhones.firstOrNull().orEmpty() }
+        MeezaPaymentQrDialog(
+            contactName = contact.displayName,
+            phone = targetPhone,
+            amount = paymentAmount.takeIf { it.isNotBlank() },
+            onDismiss = { showMeezaQrDialog = false },
+        )
+    }
+
     if (showAddPaymentDialog) {
         AddPaymentTemplateDialog(
             onDismiss = { showAddPaymentDialog = false },
@@ -560,6 +662,93 @@ fun ContactDetailBottomSheet(
             },
         )
     }
+}
+
+@Composable
+private fun PaymentActionRow(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onLaunch: () -> Unit,
+    onCopy: () -> Unit,
+    tag: String,
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onLaunch)
+            .testTag(tag),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(icon, contentDescription = null, tint = InstaPayPurple)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                Text(
+                    subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onCopy) {
+                Icon(Icons.Rounded.ContentCopy, contentDescription = "نسخ", modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+@Composable
+private fun MeezaPaymentQrDialog(
+    contactName: String,
+    phone: String,
+    amount: String?,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val payload = remember(contactName, phone, amount) {
+        PaymentUtils.buildMeezaQrPayload(contactName, phone, amount)
+    }
+    val bitmap = remember(payload) { QrUtils.generateQrBitmap(payload, 540) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("QR تحويل ميزة / المحافظ") },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Meeza Payment QR",
+                        modifier = Modifier.size(220.dp).clip(RoundedCornerShape(12.dp)),
+                    )
+                }
+                Text(
+                    text = "المستلم: $contactName (${PhoneUtils.toLocalEgyptianPhone(phone)})" +
+                        if (!amount.isNullOrBlank()) "\nالمبلغ: $amount ج.م" else "",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { copyToClipboard(context, PhoneUtils.toLocalEgyptianPhone(phone)) }) {
+                Text("نسخ الرقم")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("إغلاق") }
+        },
+    )
 }
 
 @Composable
@@ -903,7 +1092,7 @@ fun AddPaymentTemplateDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "استخدم {phone_local} للرقم المحلي (010...) أو {phone} للأرقام الدولية بدون +، أو اكتب بداية اللينك ليتم دمجه تلقائياً مع الرقم.",
+                    "استخدم {phone_local} للرقم المحلي (010...) أو {phone} للأرقام الدولية بدون +، أو tel:*9*7*{phone_local}%23 لأكواد الاتصال.",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedTextField(

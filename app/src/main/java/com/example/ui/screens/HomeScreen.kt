@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.provider.CallLog
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -14,7 +15,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,11 +29,12 @@ import androidx.compose.material.icons.automirrored.rounded.CallMissed
 import androidx.compose.material.icons.automirrored.rounded.CallReceived
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Call
-import androidx.compose.material.icons.rounded.CallMissed
 import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.QrCodeScanner
@@ -51,9 +52,11 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,7 +74,6 @@ import com.example.ui.components.ContactSummaryCard
 import com.example.ui.theme.WhatsAppGreen
 import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
-import android.provider.CallLog
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -88,6 +90,7 @@ fun HomeScreen(
     weeklyLogs: List<WhatsAppLog>,
     bundledImported: Boolean,
     importProgressText: String?,
+    cloudSyncStatus: String?,
     onSearchQueryChange: (String) -> Unit,
     onOpenContact: (ContactRecord) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
@@ -95,6 +98,8 @@ fun HomeScreen(
     onCaptureWhatsApp: () -> Unit,
     onOpenCategories: () -> Unit,
     onOpenQrScanner: () -> Unit,
+    onOpenDialpad: () -> Unit,
+    onOpenAiAssistant: () -> Unit,
     onImportBundledCsv: () -> Unit,
     onSyncWeeklyWhatsApp: () -> Unit,
     onPermissionsChanged: () -> Unit,
@@ -103,7 +108,7 @@ fun HomeScreen(
 
     val callLogLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
+    ) {
         onPermissionsChanged()
     }
 
@@ -147,22 +152,22 @@ fun HomeScreen(
             )
         }
 
-        if (importProgressText != null) {
+        if (importProgressText != null || cloudSyncStatus != null) {
             item {
                 Card(
                     shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(importProgressText, style = MaterialTheme.typography.titleSmall)
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(importProgressText ?: cloudSyncStatus.orEmpty(), style = MaterialTheme.typography.titleSmall)
                         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     }
                 }
             }
         }
 
-        // If searching, show ONLY matching search results lazily (never all 20,000!)
+        // If searching, show ONLY matching search results lazily
         if (searchQuery.isNotBlank()) {
             item {
                 Text(
@@ -218,14 +223,14 @@ fun HomeScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "قاعدة رابطة المفهرسة",
+                                text = "قاعدة رابطة السريعة",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                             )
                             Text(
-                                text = "$totalCount جهة اتصال مفهرسة جاهزة دون تحميل على الهاتف",
+                                text = "$totalCount جهة اتصال مفهرسة • اسحب يمين للاتصال أو يسار لواتساب",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                             )
@@ -242,6 +247,22 @@ fun HomeScreen(
                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        FilledTonalButton(
+                            onClick = onOpenDialpad,
+                            modifier = Modifier.testTag("home_dialpad_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Dialpad, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("لوحة الاتصال")
+                        }
+                        FilledTonalButton(
+                            onClick = onOpenAiAssistant,
+                            modifier = Modifier.testTag("home_ai_assistant_btn"),
+                        ) {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("مساعد Gemini")
+                        }
                         FilledTonalButton(
                             onClick = onAddContact,
                             modifier = Modifier.testTag("home_add_contact_btn"),
@@ -517,40 +538,90 @@ private fun CallLogRowCard(
         CallLog.Calls.MISSED_TYPE -> Icons.AutoMirrored.Rounded.CallMissed
         else -> Icons.AutoMirrored.Rounded.CallReceived
     }
+    val canWa = !PhoneUtils.isUssdOrShortCode(entry.number)
 
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onOpen),
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            when (value) {
+                SwipeToDismissBoxValue.StartToEnd -> {
+                    onDial()
+                    false
+                }
+                SwipeToDismissBoxValue.EndToStart -> {
+                    if (canWa) onWhatsApp()
+                    false
+                }
+                SwipeToDismissBoxValue.Settled -> false
+            }
+        }
+    )
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = entry.number.isNotBlank(),
+        enableDismissFromEndToStart = canWa,
+        backgroundContent = {
+            val dir = dismissState.dismissDirection
+            val bgColor = when (dir) {
+                SwipeToDismissBoxValue.StartToEnd -> MaterialTheme.colorScheme.primaryContainer
+                SwipeToDismissBoxValue.EndToStart -> WhatsAppGreen.copy(alpha = 0.2f)
+                SwipeToDismissBoxValue.Settled -> MaterialTheme.colorScheme.surface
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(bgColor)
+                    .padding(horizontal = 18.dp),
+            ) {
+                if (dir == SwipeToDismissBoxValue.StartToEnd) {
+                    Row(modifier = Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Rounded.Call, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("اتصال", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                    }
+                } else if (dir == SwipeToDismissBoxValue.EndToStart) {
+                    Row(modifier = Modifier.align(Alignment.CenterEnd), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("واتساب", style = MaterialTheme.typography.labelLarge, color = WhatsAppGreen)
+                        Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen)
+                    }
+                }
+            }
+        },
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        Card(
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpen),
         ) {
-            Icon(
-                imageVector = callIcon,
-                contentDescription = null,
-                tint = if (entry.callType == CallLog.Calls.MISSED_TYPE) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(label, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                    "${entry.number} • ${entry.callCount}× • $timeText",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = callIcon,
+                    contentDescription = null,
+                    tint = if (entry.callType == CallLog.Calls.MISSED_TYPE) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                 )
-            }
-            FilledTonalIconButton(onClick = onDial, modifier = Modifier.size(40.dp)) {
-                Icon(Icons.Rounded.Call, contentDescription = "اتصال", modifier = Modifier.size(18.dp))
-            }
-            if (!PhoneUtils.isUssdOrShortCode(entry.number)) {
-                FilledTonalIconButton(onClick = onWhatsApp, modifier = Modifier.size(40.dp)) {
-                    Icon(Icons.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen, modifier = Modifier.size(18.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(label, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${entry.number} • ${entry.callCount}× • $timeText",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                FilledTonalIconButton(onClick = onDial, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Rounded.Call, contentDescription = "اتصال", modifier = Modifier.size(18.dp))
+                }
+                if (canWa) {
+                    FilledTonalIconButton(onClick = onWhatsApp, modifier = Modifier.size(40.dp)) {
+                        Icon(Icons.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen, modifier = Modifier.size(18.dp))
+                    }
                 }
             }
         }

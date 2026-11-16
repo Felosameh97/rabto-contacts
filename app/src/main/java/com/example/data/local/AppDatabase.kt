@@ -11,17 +11,21 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.example.ui.theme.CalmPalette
+import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 @Database(
     entities = [
         ContactEntity::class,
+        ContactCategoryCrossRef::class,
+        PhoneLookupEntity::class,
         CategoryEntity::class,
         WhatsAppLogEntity::class,
         PaymentTemplateEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class RabtaDatabase : RoomDatabase() {
@@ -55,6 +59,9 @@ class SyncPrefsDataStore(private val context: Context) {
     private val githubRepoKey = stringPreferencesKey("github_repo_slug")
     private val lastSyncKey = longPreferencesKey("last_cloud_sync_ms")
     private val bundledImportedKey = booleanPreferencesKey("bundled_csv_imported")
+    private val themeModeKey = stringPreferencesKey("theme_mode")
+    private val paletteKey = stringPreferencesKey("calm_palette")
+    private val autoRecordKey = booleanPreferencesKey("auto_record_calls")
 
     val githubRepoFlow: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[githubRepoKey] ?: ""
@@ -68,6 +75,20 @@ class SyncPrefsDataStore(private val context: Context) {
         prefs[bundledImportedKey] ?: false
     }
 
+    val themeModeFlow: Flow<ThemeMode> = context.dataStore.data.map { prefs ->
+        runCatching { ThemeMode.valueOf(prefs[themeModeKey] ?: ThemeMode.SYSTEM.name) }
+            .getOrDefault(ThemeMode.SYSTEM)
+    }
+
+    val paletteFlow: Flow<CalmPalette> = context.dataStore.data.map { prefs ->
+        runCatching { CalmPalette.valueOf(prefs[paletteKey] ?: CalmPalette.SLATE.name) }
+            .getOrDefault(CalmPalette.SLATE)
+    }
+
+    val autoRecordCallsFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[autoRecordKey] ?: false
+    }
+
     suspend fun setGithubRepoSlug(slug: String) {
         context.dataStore.edit { it[githubRepoKey] = slug.trim() }
     }
@@ -78,5 +99,17 @@ class SyncPrefsDataStore(private val context: Context) {
 
     suspend fun setBundledImported(imported: Boolean) {
         context.dataStore.edit { it[bundledImportedKey] = imported }
+    }
+
+    suspend fun setThemeMode(mode: ThemeMode) {
+        context.dataStore.edit { it[themeModeKey] = mode.name }
+    }
+
+    suspend fun setPalette(palette: CalmPalette) {
+        context.dataStore.edit { it[paletteKey] = palette.name }
+    }
+
+    suspend fun setAutoRecordCalls(enabled: Boolean) {
+        context.dataStore.edit { it[autoRecordKey] = enabled }
     }
 }

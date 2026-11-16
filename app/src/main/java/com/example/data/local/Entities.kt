@@ -13,8 +13,8 @@ import com.example.domain.model.WhatsAppLog
     indices = [
         Index(value = ["displayName"]),
         Index(value = ["primaryPhone"]),
-        Index(value = ["searchBlob"]),
-        Index(value = ["categoryPathsFlat"]),
+        Index(value = ["isFavorite"]),
+        Index(value = ["syncedToDevice"]),
         Index(value = ["district"]),
         Index(value = ["updatedAtEpochMs"]),
     ]
@@ -102,6 +102,32 @@ data class ContactEntity(
         }
     }
 }
+
+@Entity(
+    tableName = "contact_categories",
+    primaryKeys = ["contactId", "categoryPath"],
+    indices = [
+        Index(value = ["categoryPath"]),
+        Index(value = ["contactId"]),
+    ]
+)
+data class ContactCategoryCrossRef(
+    val contactId: String,
+    val categoryPath: String,
+)
+
+@Entity(
+    tableName = "phone_lookup",
+    primaryKeys = ["phoneKey", "contactId"],
+    indices = [
+        Index(value = ["phoneKey"]),
+        Index(value = ["contactId"]),
+    ]
+)
+data class PhoneLookupEntity(
+    val phoneKey: String,
+    val contactId: String,
+)
 
 @Entity(
     tableName = "categories",

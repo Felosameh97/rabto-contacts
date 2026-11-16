@@ -15,10 +15,6 @@ object CsvParser {
         val categoryPaths: Set<String>,
     )
 
-    /**
-     * RFC-4180 compliant streaming CSV parser supporting multi-line quoted values,
-     * Google Contacts CSV exports (` ::: ` multi-values), and generic / EAEAT CSVs.
-     */
     fun parseStream(inputStream: InputStream, defaultCategory: String? = null): ParsedDataset {
         val reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
         val rows = readAllCsvRows(reader)
@@ -34,8 +30,92 @@ object CsvParser {
         return if (isGoogleContacts) {
             parseGoogleContactsRows(headers, headerIndex, rows.drop(1), defaultCategory)
         } else {
-            parseGenericRows(headers, headerIndex, rows.drop(1), defaultCategory)
+            parseGenericRows(headers, rows.drop(1), defaultCategory)
         }
+    }
+
+    /**
+     * Parses arbitrary Drive spreadsheets, CSVs, TSVs, or text dumps: falls back to scanning
+     * every row for valid mobile numbers + nearest text name/email if standard headers are absent.
+     */
+    fun parseArbitrarySheetOrText(rawText: String, sourceTitle: String): ParsedDataset {
+        val trimmed = rawText.trim()
+        if (trimmed.isBlank()) return ParsedDataset(emptyList(), 0, emptySet())
+
+        val vcards = if (trimmed.contains("BEGIN:VCARD", ignoreCase = true)) {
+            VCardUtils.parseVCards(trimmed)
+        } else emptyList()
+        if (vcards.isNotEmpty()) {
+            val cats = LinkedHashSet<String>()
+            val tagged = vcards.map { c ->
+                val cat = "Google Drive > $sourceTitle"
+                addHierarchySegments(cat, cats)
+                c.copy(categoryPaths = (c.categoryPaths + cat).distinct())
+            }
+            return ParsedDataset(tagged, 0, cats)
+        }
+
+        // Try standard CSV parsing first
+        val csvAttempt = trimmed.byteInputStream(StandardCharsets.UTF_8).use {
+            parseStream(it, defaultCategory = "Google Drive > $sourceTitle")
+        }
+        if (csvAttempt.contacts.isNotEmpty()) return csvAttempt
+
+        // Fallback: line-by-line regex extraction for messy sheets/notes/TSV
+        val contacts = ArrayList<ContactRecord>()
+        val categories = LinkedHashSet<String>()
+        val driveCat = "Google Drive > $sourceTitle"
+        addHierarchySegments(driveCat, categories)
+        val phoneRegex = Regex("""(\+?\d[\d\s\-().]{7,17}\d)""")
+
+        for (line in trimmed.lineSequence()) {
+            val cleanLine = line.trim()
+            if (cleanLine.isBlank()) continue
+            val matches = phoneRegex.findAll(cleanLine)
+                .map { PhoneUtils.normalizePhone(it.value) }
+                .filter { it.length >= 9 }
+                .distinct()
+                .toList()
+            if (matches.isEmpty()) continue
+
+            val textWithoutPhones = phoneRegex.replace(cleanLine, " ")
+                .replace(Regex("[,;\t|]+"), " ")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            val emailMatch = Regex("""[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}""").find(textWithoutPhones)?.value
+            val name = textWithoutPhones
+                .replace(emailMatch.orEmpty(), "")
+                .trim(' ', '-', ':', '•')
+                .ifBlank { matches.first() }
+                .take(160)
+
+            val (smartCats, starred) = SmartCategoryEngine.normalizeAndNestLabels(
+                rawLabels = listOf(driveCat),
+                displayName = name,
+                phones = matches,
+                emails = listOfNotNull(emailMatch),
+                organization = null,
+                jobTitle = null,
+                notes = null,
+                address = null,
+            )
+            smartCats.forEach { addHierarchySegments(it, categories) }
+            val geo = EgyptGeoLookup.inferLocation(name, sourceTitle) ?: EgyptGeoLookup.inferLocationFromPhone(matches.first())
+
+            contacts += ContactRecord(
+                id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
+                displayName = name,
+                primaryPhone = matches.first(),
+                phones = matches,
+                emails = listOfNotNull(emailMatch),
+                categoryPaths = smartCats,
+                district = geo?.key,
+                latitude = geo?.lat,
+                longitude = geo?.lng,
+                isFavorite = starred,
+            )
+        }
+        return ParsedDataset(contacts, 0, categories)
     }
 
     private fun parseGoogleContactsRows(
@@ -84,6 +164,7 @@ object CsvParser {
             val middle = col("Middle Name")
             val last = col("Last Name")
             val nickname = col("Nickname")
+            val fileAs = col("File As")
             val org = col("Organization Name")
             val title = col("Organization Title")
             val notes = col("Notes")
@@ -93,6 +174,7 @@ object CsvParser {
                 .filter { it.isNotBlank() }
                 .joinToString(" ")
                 .ifBlank { nickname }
+                .ifBlank { fileAs }
                 .ifBlank { org }
                 .ifBlank { phones.firstOrNull().orEmpty() }
                 .ifBlank { emails.firstOrNull().orEmpty() }
@@ -102,39 +184,28 @@ object CsvParser {
                 continue
             }
 
-            val rawLabels = splitGoogleMulti(col("Labels"))
-                .filter { label ->
-                    label != "* myContacts" &&
-                        !label.equals("myContacts", ignoreCase = true) &&
-                        !label.startsWith("Imported on", ignoreCase = true)
-                }
-
-            val parsedCats = LinkedHashSet<String>()
-            for (lbl in rawLabels) {
-                val normalizedPath = lbl
-                    .replace(" / ", " > ")
-                    .replace("/", " > ")
-                    .replace("::", " > ")
-                    .split(">")
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-                    .joinToString(" > ")
-                if (normalizedPath.isNotBlank()) {
-                    parsedCats += normalizedPath
-                    addHierarchySegments(normalizedPath, categories)
-                }
-            }
-            if (!defaultCategory.isNullOrBlank() && parsedCats.isEmpty()) {
-                parsedCats += defaultCategory
-                addHierarchySegments(defaultCategory, categories)
-            }
+            val rawLabels = splitGoogleMulti(col("Labels")) +
+                listOfNotNull(defaultCategory?.takeIf { it.isNotBlank() })
 
             val addressParts = addressIndices
                 .mapNotNull { idx -> row.getOrNull(idx)?.trim()?.takeIf { it.isNotBlank() } }
                 .distinct()
             val address = addressParts.joinToString(" - ").ifBlank { null }
 
-            val geoMatch = EgyptGeoLookup.inferLocation(address, rawName, notes, parsedCats.joinToString(" "))
+            val (nestedCategories, isStarred) = SmartCategoryEngine.normalizeAndNestLabels(
+                rawLabels = rawLabels,
+                displayName = rawName,
+                phones = phones,
+                emails = emails,
+                organization = org.ifBlank { null },
+                jobTitle = title.ifBlank { null },
+                notes = notes.ifBlank { null },
+                address = address,
+            )
+            nestedCategories.forEach { addHierarchySegments(it, categories) }
+
+            val geoMatch = EgyptGeoLookup.inferLocation(address, rawName, notes, rawLabels.joinToString(" "))
+                ?: phones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
             val contactId = "c_" + UUID.randomUUID().toString().replace("-", "").take(16)
 
             contacts += ContactRecord(
@@ -143,7 +214,7 @@ object CsvParser {
                 primaryPhone = phones.firstOrNull().orEmpty(),
                 phones = phones,
                 emails = emails,
-                categoryPaths = parsedCats.toList().take(15),
+                categoryPaths = nestedCategories,
                 organization = org.ifBlank { null },
                 jobTitle = title.ifBlank { null },
                 notes = notes.ifBlank { null },
@@ -152,6 +223,7 @@ object CsvParser {
                 latitude = geoMatch?.lat,
                 longitude = geoMatch?.lng,
                 website = website,
+                isFavorite = isStarred,
             )
         }
 
@@ -160,12 +232,11 @@ object CsvParser {
 
     private fun parseGenericRows(
         headers: List<String>,
-        headerIndex: Map<String, Int>,
         dataRows: List<List<String>>,
         defaultCategory: String?,
     ): ParsedDataset {
-        val nameCol = findCol(headers, listOf("name", "full name", "الاسم", "displayname"))
-        val phoneCol = findCol(headers, listOf("phone", "mobile", "tel", "رقم", "الهاتف"))
+        val nameCol = findCol(headers, listOf("name", "full name", "الاسم", "displayname", "student"))
+        val phoneCol = findCol(headers, listOf("phone", "mobile", "tel", "رقم", "الهاتف", "الموبايل", "واتساب"))
         val emailCol = findCol(headers, listOf("email address", "email", "e-mail", "البريد", "الإيميل"))
         val linkCol = findCol(headers, listOf("link", "whatsapp", "wa.me"))
         val deptCol = findCol(headers, listOf("القسم", "department", "category", "فئة"))
@@ -186,37 +257,59 @@ object CsvParser {
             val extId = idCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
 
             val linkPhone = Regex("""wa\.me/(\d{8,15})""").find(rawLink)?.groupValues?.getOrNull(1).orEmpty()
-            val normalizedPhone = PhoneUtils.normalizePhone(rawPhone.ifBlank { linkPhone })
+            // Also scan entire row if neither primary phoneCol nor link had a valid phone
+            val fallbackRowPhone = if (rawPhone.isBlank() && linkPhone.isBlank()) {
+                row.firstNotNullOfOrNull { cell ->
+                    PhoneUtils.extractPhonesFromSharedText(cell).firstOrNull()
+                }.orEmpty()
+            } else ""
+
+            val normalizedPhone = PhoneUtils.normalizePhone(
+                rawPhone.ifBlank { linkPhone }.ifBlank { fallbackRowPhone }
+            )
             if (normalizedPhone.isBlank() && rawEmail.isBlank()) {
                 skipped++
                 continue
             }
 
             val displayName = rawName.ifBlank {
-                if (extId.isNotBlank()) "طالب $extId" else normalizedPhone.ifBlank { rawEmail }
+                if (extId.isNotBlank() && extId != ".") "طالب $extId" else normalizedPhone.ifBlank { rawEmail }
             }
 
+            val base = defaultCategory ?: "الجامعة > الأكاديمية (EAEAT)"
             val catParts = buildList {
-                add(defaultCategory ?: "الجامعة > EAEAT")
+                add(base)
                 if (batch.isNotBlank() && batch != "0") add("دفعة $batch")
                 if (dept.isNotBlank()) add(dept)
             }
             val fullPath = catParts.joinToString(" > ")
-            addHierarchySegments(fullPath, categories)
 
-            val geo = EgyptGeoLookup.inferLocation(displayName, fullPath)
+            val (nestedCats, starred) = SmartCategoryEngine.normalizeAndNestLabels(
+                rawLabels = listOf(fullPath),
+                displayName = displayName,
+                phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
+                emails = listOfNotNull(rawEmail.takeIf { it.contains("@") }),
+                organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
+                jobTitle = null,
+                notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
+                address = null,
+            )
+            nestedCats.forEach { addHierarchySegments(it, categories) }
+
+            val geo = EgyptGeoLookup.inferLocation(displayName, fullPath, "eaeat")
             contacts += ContactRecord(
                 id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
                 displayName = displayName.take(200),
                 primaryPhone = normalizedPhone,
                 phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
                 emails = listOfNotNull(rawEmail.takeIf { it.contains("@") }),
-                categoryPaths = listOf(fullPath),
-                organization = "EAEAT Academy",
-                notes = if (extId.isNotBlank()) "ID: $extId" else null,
+                categoryPaths = nestedCats,
+                organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
+                notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
                 district = geo?.key,
                 latitude = geo?.lat,
                 longitude = geo?.lng,
+                isFavorite = starred,
             )
         }
         return ParsedDataset(contacts, skipped, categories)
@@ -241,7 +334,7 @@ object CsvParser {
             .filter { it.isNotBlank() }
     }
 
-    private fun addHierarchySegments(fullPath: String, out: MutableSet<String>) {
+    fun addHierarchySegments(fullPath: String, out: MutableSet<String>) {
         val parts = fullPath.split(">").map { it.trim() }.filter { it.isNotBlank() }
         var current = ""
         for (part in parts) {

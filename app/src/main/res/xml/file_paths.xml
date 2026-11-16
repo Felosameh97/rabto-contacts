@@ -2,4 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="shared_exports" path="exports/" />
     <files-path name="app_exports" path="exports/" />
+    <files-path name="call_recordings" path="call_recordings/" />
 </paths>

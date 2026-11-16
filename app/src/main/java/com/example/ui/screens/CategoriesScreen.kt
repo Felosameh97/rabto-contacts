@@ -21,6 +21,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CreateNewFolder
@@ -62,9 +64,12 @@ fun CategoriesScreen(
     childCategories: List<CategorySummary>,
     contactsInCategory: List<ContactRecord>,
     selectedBulkIds: Set<String>,
+    isBusy: Boolean,
     onSelectPath: (String) -> Unit,
     onNavigateUp: () -> Unit,
     onCreateCategory: (String) -> Unit,
+    onReorganizeCategories: () -> Unit,
+    onAiAutoCategorize: () -> Unit,
     onOpenContact: (ContactRecord) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
     onAddContactInCategory: (String) -> Unit,
@@ -77,9 +82,7 @@ fun CategoriesScreen(
     var showNewCatDialog by remember { mutableStateOf(false) }
 
     if (currentPath.isNotEmpty()) {
-        BackHandler {
-            onNavigateUp()
-        }
+        BackHandler { onNavigateUp() }
     }
 
     val segments = remember(currentPath) {
@@ -98,14 +101,14 @@ fun CategoriesScreen(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                         if (currentPath.isNotEmpty()) {
                             IconButton(onClick = onNavigateUp, modifier = Modifier.testTag("cat_back_btn")) {
                                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "رجوع للفئة السابقة")
                             }
                         }
                         Text(
-                            text = if (currentPath.isEmpty()) "الفئات المتداخلة" else segments.last(),
+                            text = if (currentPath.isEmpty()) "الأقسام المتداخلة" else segments.last(),
                             style = MaterialTheme.typography.titleLarge,
                         )
                     }
@@ -181,7 +184,33 @@ fun CategoriesScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (currentPath.isNotEmpty()) {
+            if (currentPath.isEmpty()) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilledTonalButton(
+                            onClick = onReorganizeCategories,
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).testTag("cat_reorganize_btn"),
+                        ) {
+                            Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("تنظيم ذكي + دمج المكرر")
+                        }
+                        OutlinedButton(
+                            onClick = onAiAutoCategorize,
+                            enabled = !isBusy,
+                            modifier = Modifier.testTag("cat_ai_classify_btn"),
+                        ) {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("تصنيف Gemini")
+                        }
+                    }
+                }
+            } else {
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -287,7 +316,7 @@ fun CategoriesScreen(
                             Icon(Icons.Rounded.Folder, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(36.dp))
                             Text("لا توجد فئات أو جهات اتصال هنا بعد", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "أنشئ فئة متداخلة (مثل: الجامعة > هندسة، العيلة، المطرية، أمين شرطة) أو استورد ملفات CSV.",
+                                "أنشئ فئة متداخلة (مثل: الجامعة > الأكاديمية (EAEAT) > دفعة 2023) أو استورد ملفاتك.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -308,7 +337,7 @@ fun CategoriesScreen(
                     if (currentPath.isNotEmpty()) {
                         Text("سيتم الإنشاء داخل: $currentPath", style = MaterialTheme.typography.bodySmall)
                     } else {
-                        Text("يمكنك كتابة مسار متداخل باستخدام > مثل:\nالجامعة > هندسة > دفعة 2024", style = MaterialTheme.typography.bodySmall)
+                        Text("يمكنك كتابة مسار متداخل باستخدام > مثل:\nالجامعة > الأكاديمية (EAEAT) > دفعة 2024", style = MaterialTheme.typography.bodySmall)
                     }
                     OutlinedTextField(
                         value = newName,

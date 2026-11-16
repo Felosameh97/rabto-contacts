@@ -1,14 +1,14 @@
 <resources>
     <string name="app_name">Rabta Contacts</string>
-    <string name="tagline">مدير جهات الاتصال الذكي لـ 20,000+ رقم</string>
+    <string name="tagline">مدير جهات الاتصال والاتصال الذكي</string>
     <string name="nav_home">الرئيسية</string>
     <string name="nav_categories">الفئات</string>
     <string name="nav_map">الخريطة</string>
-    <string name="nav_tools">المزامنة</string>
+    <string name="nav_tools">الإعدادات</string>
     <string name="sign_in_title">مرحباً بك في رابطة</string>
-    <string name="sign_in_subtitle">إدارة ذكية وسريعة لـ 20,000+ رقم مع فئات متداخلة، تتبع واتساب، روابط دفع، وخريطة المواقع — بدون إثقال هاتفك.</string>
+    <string name="sign_in_subtitle">إدارة سريعة لـ 20,000+ رقم مع اتصال مباشر، تصنيف ذكي، خريطة، وروابط الدفع.</string>
     <string name="sign_in_google">تسجيل الدخول عبر Google</string>
-    <string name="search_hint">ابحث بالاسم، الرقم، الفئة، الملاحظات، أو المكان...</string>
+    <string name="search_hint">ابحث بالاسم، الرقم، الفئة، أو المنطقة...</string>
     <string name="frequent_callers_title">المتصل بهم كثيراً</string>
     <string name="recent_calls_title">آخر المكالمات من السجل</string>
     <string name="weekly_whatsapp_banner_title">مزامنة نشطي واتساب الأسبوعية</string>
@@ -33,4 +33,7 @@
     <string name="website_action">موقع ويب</string>
     <string name="sync_to_phone">حفظ بالهاتف</string>
     <string name="remove_from_phone">إزالة من الهاتف</string>
+    <string name="widget_description">اختصار سريع للمفضلة ولوحة الاتصال ومساعد رابطة على الشاشة الرئيسية</string>
+    <string name="dialpad_title">لوحة الاتصال المباشر</string>
+    <string name="ai_assistant_title">مساعد رابطة الذكي</string>
 </resources>

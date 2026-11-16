@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.AiCommandAction
+import com.example.ai.RabtaAiAssistant
 import com.example.data.device.CallLogReader
 import com.example.data.device.DeviceContactsManager
 import com.example.data.local.CategoryEntity
@@ -14,6 +16,7 @@ import com.example.data.local.SyncPrefsDataStore
 import com.example.data.local.WhatsAppLogEntity
 import com.example.data.remote.FirestoreContactsRepository
 import com.example.data.remote.GitHubUpdateService
+import com.example.data.remote.GoogleDriveScanner
 import com.example.domain.model.CallLogEntry
 import com.example.domain.model.CategoryNode
 import com.example.domain.model.CategorySummary
@@ -22,15 +25,23 @@ import com.example.domain.model.CsvImportSummary
 import com.example.domain.model.GitHubReleaseInfo
 import com.example.domain.model.PaymentTemplate
 import com.example.domain.model.WhatsAppLog
+import com.example.telecom.CallRecorderManager
+import com.example.telecom.CallRecordingItem
+import com.example.ui.theme.CalmPalette
+import com.example.ui.theme.ThemeMode
 import com.example.util.CsvParser
 import com.example.util.EgyptGeoLookup
 import com.example.util.PaymentUtils
 import com.example.util.PhoneUtils
+import com.example.util.SmartCategoryEngine
 import com.example.util.SystemIntents
 import com.example.util.VCardUtils
+import com.example.widget.RabtaWidget
 import com.google.firebase.firestore.DocumentSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -43,6 +54,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
+sealed interface AiAssistantUiState {
+    data object Idle : AiAssistantUiState
+    data object Loading : AiAssistantUiState
+    data class Success(
+        val reply: String,
+        val actionBadge: String,
+        val matchedContacts: List<ContactRecord> = emptyList(),
+        val suggestedMessage: String? = null,
+        val paymentAmount: String? = null,
+    ) : AiAssistantUiState
+    data class Error(val message: String) : AiAssistantUiState
+}
+
 class RabtaViewModel(
     private val appContext: Context,
     private val currentUserId: String,
@@ -54,6 +78,7 @@ class RabtaViewModel(
     private val deviceContactsManager: DeviceContactsManager,
     private val prefs: SyncPrefsDataStore,
     private val gitHubService: GitHubUpdateService,
+    private val aiAssistant: RabtaAiAssistant = RabtaAiAssistant(),
 ) : ViewModel() {
 
     private val contactDao = db.contactDao()
@@ -92,10 +117,16 @@ class RabtaViewModel(
     val githubRepoSlug: StateFlow<String> = prefs.githubRepoFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
 
-    val lastCloudSyncMs: StateFlow<Long> = prefs.lastSyncFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0L)
-
     val bundledImported: StateFlow<Boolean> = prefs.bundledImportedFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val themeMode: StateFlow<ThemeMode> = prefs.themeModeFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ThemeMode.SYSTEM)
+
+    val calmPalette: StateFlow<CalmPalette> = prefs.paletteFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CalmPalette.SLATE)
+
+    val autoRecordCalls: StateFlow<Boolean> = prefs.autoRecordCallsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     private val _searchQuery = MutableStateFlow("")
@@ -103,6 +134,9 @@ class RabtaViewModel(
 
     private val _searchResults = MutableStateFlow<List<ContactRecord>>(emptyList())
     val searchResults = _searchResults.asStateFlow()
+
+    private val _dialpadMatches = MutableStateFlow<List<ContactRecord>>(emptyList())
+    val dialpadMatches = _dialpadMatches.asStateFlow()
 
     private val _frequentCalls = MutableStateFlow<List<CallLogEntry>>(emptyList())
     val frequentCalls = _frequentCalls.asStateFlow()
@@ -112,9 +146,6 @@ class RabtaViewModel(
 
     private val _hasCallLogPermission = MutableStateFlow(callLogReader.hasPermission())
     val hasCallLogPermission = _hasCallLogPermission.asStateFlow()
-
-    private val _hasContactsPermission = MutableStateFlow(deviceContactsManager.hasPermissions())
-    val hasContactsPermission = _hasContactsPermission.asStateFlow()
 
     private val _currentCategoryPath = MutableStateFlow("")
     val currentCategoryPath = _currentCategoryPath.asStateFlow()
@@ -140,6 +171,9 @@ class RabtaViewModel(
     private val _importProgressText = MutableStateFlow<String?>(null)
     val importProgressText = _importProgressText.asStateFlow()
 
+    private val _cloudSyncStatus = MutableStateFlow<String?>(null)
+    val cloudSyncStatus = _cloudSyncStatus.asStateFlow()
+
     private val _releaseInfo = MutableStateFlow<GitHubReleaseInfo?>(null)
     val releaseInfo = _releaseInfo.asStateFlow()
 
@@ -149,7 +183,15 @@ class RabtaViewModel(
     private val _pendingWhatsAppCapture = MutableStateFlow<ContactRecord?>(null)
     val pendingWhatsAppCapture = _pendingWhatsAppCapture.asStateFlow()
 
+    private val _aiUiState = MutableStateFlow<AiAssistantUiState>(AiAssistantUiState.Idle)
+    val aiUiState = _aiUiState.asStateFlow()
+
+    private val _callRecordings = MutableStateFlow<List<CallRecordingItem>>(emptyList())
+    val callRecordings = _callRecordings.asStateFlow()
+
     private var searchJob: Job? = null
+    private var dialpadJob: Job? = null
+    private var cloudUploadJob: Job? = null
 
     init {
         initializeSession()
@@ -158,7 +200,7 @@ class RabtaViewModel(
     private fun initializeSession() {
         viewModelScope.launch {
             firestoreRepo.ensureUserProfile(currentUserId, currentUserName, currentUserEmail)
-            if (paymentDao.count() == 0) {
+            withContext(Dispatchers.IO) {
                 paymentDao.upsertAll(
                     PaymentUtils.defaultTemplates.map {
                         PaymentTemplateEntity(it.id, it.name, it.urlTemplate, it.isDefault)
@@ -167,38 +209,45 @@ class RabtaViewModel(
             }
             refreshCallLogs()
             loadCategoryLevel("")
-            // Pull cloud payment templates & logs gently in background
+            refreshRecordings()
+
             launch {
                 firestoreRepo.observeWhatsAppLogs(currentUserId)
                     .catch { }
                     .collect { cloudLogs ->
                         if (cloudLogs.isNotEmpty()) {
-                            logDao.upsertAll(
-                                cloudLogs.map {
-                                    WhatsAppLogEntity(
-                                        id = it.id,
-                                        contactId = it.contactId,
-                                        contactName = it.contactName,
-                                        phone = it.phone,
-                                        loggedAtEpochMs = it.loggedAtEpochMs,
-                                        syncedToPhone = it.syncedToPhone,
-                                    )
-                                }
-                            )
+                            withContext(Dispatchers.IO) {
+                                logDao.upsertAll(
+                                    cloudLogs.map {
+                                        WhatsAppLogEntity(
+                                            id = it.id,
+                                            contactId = it.contactId,
+                                            contactName = it.contactName,
+                                            phone = it.phone,
+                                            loggedAtEpochMs = it.loggedAtEpochMs,
+                                            syncedToPhone = it.syncedToPhone,
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
             }
+
             launch {
                 firestoreRepo.observePaymentTemplates(currentUserId)
                     .catch { }
                     .collect { templates ->
                         if (templates.isNotEmpty()) {
-                            paymentDao.upsertAll(
-                                templates.map { PaymentTemplateEntity(it.id, it.name, it.urlTemplate, it.isDefault) }
-                            )
+                            withContext(Dispatchers.IO) {
+                                paymentDao.upsertAll(
+                                    templates.map { PaymentTemplateEntity(it.id, it.name, it.urlTemplate, it.isDefault) }
+                                )
+                            }
                         }
                     }
             }
+
             launch {
                 val savedRepo = prefs.githubRepoFlow.firstOrNull().orEmpty().trim()
                 if (savedRepo.isNotBlank()) {
@@ -211,6 +260,32 @@ class RabtaViewModel(
                 }
             }
         }
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        viewModelScope.launch { prefs.setThemeMode(mode) }
+    }
+
+    fun setCalmPalette(palette: CalmPalette) {
+        viewModelScope.launch { prefs.setPalette(palette) }
+    }
+
+    fun setAutoRecordCalls(enabled: Boolean) {
+        viewModelScope.launch { prefs.setAutoRecordCalls(enabled) }
+    }
+
+    fun refreshRecordings() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _callRecordings.value = CallRecorderManager.listRecordings(appContext)
+        }
+    }
+
+    fun deleteRecording(item: CallRecordingItem) {
+        viewModelScope.launch(Dispatchers.IO) {
+            CallRecorderManager.deleteRecording(item.file)
+            _callRecordings.value = CallRecorderManager.listRecordings(appContext)
+        }
+        _statusMessage.value = "تم حذف التسجيل"
     }
 
     fun clearStatusMessage() {
@@ -245,9 +320,7 @@ class RabtaViewModel(
                             categoryPaths = listOf("واتساب"),
                             notes = rawText.take(300),
                         )
-                    } else {
-                        null
-                    }
+                    } else null
                 }
                 if (parsed != null) {
                     _pendingWhatsAppCapture.value = parsed
@@ -258,7 +331,6 @@ class RabtaViewModel(
 
     fun refreshPermissionsState() {
         _hasCallLogPermission.value = callLogReader.hasPermission()
-        _hasContactsPermission.value = deviceContactsManager.hasPermissions()
         if (_hasCallLogPermission.value) {
             refreshCallLogs()
         }
@@ -283,6 +355,7 @@ class RabtaViewModel(
             return
         }
         searchJob = viewModelScope.launch {
+            delay(150L)
             val cleaned = query.trim().lowercase()
             val results = withContext(Dispatchers.IO) {
                 contactDao.searchContacts(cleaned, limit = 60, offset = 0).map { it.toDomain() }
@@ -291,34 +364,57 @@ class RabtaViewModel(
         }
     }
 
+    fun searchForDialpad(query: String) {
+        dialpadJob?.cancel()
+        val trimmed = query.trim().lowercase()
+        if (trimmed.isEmpty()) {
+            _dialpadMatches.value = emptyList()
+            return
+        }
+        dialpadJob = viewModelScope.launch {
+            delay(100L)
+            val results = withContext(Dispatchers.IO) {
+                contactDao.searchContacts(trimmed, limit = 15, offset = 0).map { it.toDomain() }
+            }
+            _dialpadMatches.value = results
+        }
+    }
+
     fun loadCategoryLevel(path: String) {
         _currentCategoryPath.value = path
         viewModelScope.launch(Dispatchers.IO) {
             val allCats = categoryDao.getAll()
-            val prefix = if (path.isEmpty()) "" else "$path > "
             val directChildren = if (path.isEmpty()) {
                 allCats.filter { it.depth == 0 }
             } else {
                 allCats.filter { it.parentPath == path }
             }
 
-            // Also discover dynamic category prefixes from contacts if category table lacks any leaf
+            // Single GROUP BY query instead of N LIKE scans
+            val paths = directChildren.map { it.fullPath }
+            val countsMap = if (paths.isNotEmpty()) {
+                paths.chunked(400).flatMap { contactDao.countForCategoryPaths(it) }
+                    .associate { it.categoryPath to it.cnt }
+            } else {
+                emptyMap()
+            }
+
             val summaries = directChildren.map { cat ->
-                val count = contactDao.countByCategoryPath(cat.fullPath)
                 val childCnt = allCats.count { it.parentPath == cat.fullPath }
                 CategorySummary(
                     name = cat.name,
                     fullPath = cat.fullPath,
                     parentPath = cat.parentPath,
                     depth = cat.depth,
-                    contactCount = count,
+                    contactCount = countsMap[cat.fullPath] ?: 0,
                     childCount = childCnt,
                 )
-            }
+            }.sortedByDescending { it.contactCount }
+
             _childCategories.value = summaries
 
             val contacts = if (path.isNotBlank()) {
-                contactDao.getByCategoryPath(path, limit = 100, offset = 0).map { it.toDomain() }
+                contactDao.getByCategoryPath(path, limit = 150, offset = 0).map { it.toDomain() }
             } else {
                 emptyList()
             }
@@ -345,7 +441,7 @@ class RabtaViewModel(
                     CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
                 })
             }
-            firestoreRepo.upsertCategories(currentUserId, nodes)
+            launch { firestoreRepo.upsertCategories(currentUserId, nodes) }
             loadCategoryLevel(_currentCategoryPath.value)
             _statusMessage.value = "تم إنشاء الفئة بنجاح"
         }
@@ -369,32 +465,47 @@ class RabtaViewModel(
                 .take(10)
             val geo = if (contact.latitude == null || contact.longitude == null) {
                 EgyptGeoLookup.inferLocation(contact.address, contact.district, contact.displayName, contact.categoryPaths.joinToString(" "))
-            } else {
-                null
-            }
+                    ?: normalizedPhones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
+            } else null
+
+            val cats = if (contact.categoryPaths.isEmpty()) {
+                SmartCategoryEngine.normalizeAndNestLabels(
+                    rawLabels = emptyList(),
+                    displayName = contact.displayName,
+                    phones = normalizedPhones,
+                    emails = contact.emails,
+                    organization = contact.organization,
+                    jobTitle = contact.jobTitle,
+                    notes = contact.notes,
+                    address = contact.address,
+                ).first
+            } else contact.categoryPaths
+
             val cleaned = contact.copy(
                 id = id,
                 primaryPhone = normalizedPhones.firstOrNull().orEmpty(),
                 phones = normalizedPhones,
+                categoryPaths = cats,
                 district = contact.district ?: geo?.key,
                 latitude = contact.latitude ?: geo?.lat,
                 longitude = contact.longitude ?: geo?.lng,
             )
 
+            var catNodesToSync: List<CategoryNode> = emptyList()
             withContext(Dispatchers.IO) {
-                contactDao.upsert(ContactEntity.fromDomain(cleaned))
+                contactDao.upsertSingleWithIndexes(ContactEntity.fromDomain(cleaned))
                 if (cleaned.categoryPaths.isNotEmpty()) {
-                    val catNodes = buildCategoryNodes(cleaned.categoryPaths.toSet())
-                    categoryDao.upsertAll(catNodes.map {
+                    catNodesToSync = buildCategoryNodes(cleaned.categoryPaths.toSet())
+                    categoryDao.upsertAll(catNodesToSync.map {
                         CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
                     })
-                    if (syncToCloud) {
-                        firestoreRepo.upsertCategories(currentUserId, catNodes)
-                    }
                 }
             }
             if (syncToCloud) {
-                firestoreRepo.upsertContact(currentUserId, cleaned)
+                if (catNodesToSync.isNotEmpty()) {
+                    launch { firestoreRepo.upsertCategories(currentUserId, catNodesToSync) }
+                }
+                launch { firestoreRepo.upsertContact(currentUserId, cleaned) }
             }
             if (_selectedContact.value?.id == cleaned.id) {
                 _selectedContact.value = cleaned
@@ -404,19 +515,21 @@ class RabtaViewModel(
                 updateSearchQuery(_searchQuery.value)
             }
             refreshCallLogs()
+            launch { RabtaWidget.refreshAll(appContext) }
             _statusMessage.value = "تم حفظ جهة الاتصال: ${cleaned.displayName}"
         }
     }
 
     fun deleteContact(contact: ContactRecord) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { contactDao.deleteById(contact.id) }
-            firestoreRepo.deleteContact(currentUserId, contact.id)
+            withContext(Dispatchers.IO) { contactDao.deleteContactWithIndexes(contact.id) }
+            launch { firestoreRepo.deleteContact(currentUserId, contact.id) }
             if (_selectedContact.value?.id == contact.id) {
                 _selectedContact.value = null
             }
             loadCategoryLevel(_currentCategoryPath.value)
             if (_searchQuery.value.isNotBlank()) updateSearchQuery(_searchQuery.value)
+            launch { RabtaWidget.refreshAll(appContext) }
             _statusMessage.value = "تم حذف ${contact.displayName}"
         }
     }
@@ -425,15 +538,16 @@ class RabtaViewModel(
         val next = !contact.isFavorite
         viewModelScope.launch {
             withContext(Dispatchers.IO) { contactDao.updateFavoriteFlag(contact.id, next) }
-            firestoreRepo.setContactFavorite(currentUserId, contact.id, next)
+            launch { firestoreRepo.setContactFavorite(currentUserId, contact.id, next) }
             if (_selectedContact.value?.id == contact.id) {
                 _selectedContact.value = contact.copy(isFavorite = next)
             }
             loadCategoryLevel(_currentCategoryPath.value)
+            launch { RabtaWidget.refreshAll(appContext) }
         }
     }
 
-    fun launchWhatsAppAndLog(contact: ContactRecord, phone: String) {
+    fun launchWhatsAppAndLog(contact: ContactRecord, phone: String, prefillMessage: String? = null) {
         val now = System.currentTimeMillis()
         viewModelScope.launch {
             val logId = "wa_" + UUID.randomUUID().toString().replace("-", "").take(16)
@@ -446,9 +560,9 @@ class RabtaViewModel(
                 syncedToPhone = contact.syncedToDevice,
             )
             withContext(Dispatchers.IO) { logDao.insert(entity) }
-            firestoreRepo.createWhatsAppLog(currentUserId, entity.toDomain())
+            launch { firestoreRepo.createWhatsAppLog(currentUserId, entity.toDomain()) }
         }
-        SystemIntents.openWhatsApp(appContext, phone)
+        SystemIntents.openWhatsApp(appContext, phone, prefillMessage)
     }
 
     fun toggleDeviceContactSync(contact: ContactRecord) {
@@ -464,7 +578,7 @@ class RabtaViewModel(
             }
             result.onSuccess { nowSynced ->
                 withContext(Dispatchers.IO) { contactDao.updateSyncedFlag(contact.id, nowSynced) }
-                firestoreRepo.setContactSyncedToDevice(currentUserId, contact.id, nowSynced)
+                launch { firestoreRepo.setContactSyncedToDevice(currentUserId, contact.id, nowSynced) }
                 if (_selectedContact.value?.id == contact.id) {
                     _selectedContact.value = contact.copy(syncedToDevice = nowSynced)
                 }
@@ -500,7 +614,7 @@ class RabtaViewModel(
                             contactDao.updateSyncedFlag(c.id, true)
                             logDao.markSyncedByContact(c.id)
                         }
-                        firestoreRepo.setContactSyncedToDevice(currentUserId, c.id, true)
+                        launch { firestoreRepo.setContactSyncedToDevice(currentUserId, c.id, true) }
                     }
                 }
                 _statusMessage.value = "تمت مزامنة $syncedCount من نشطي واتساب آخر 7 أيام إلى الهاتف"
@@ -515,23 +629,64 @@ class RabtaViewModel(
             _isBusy.value = true
             _importProgressText.value = "جاري قراءة ملفات جهات الاتصال المرفقة..."
             try {
-                val summary1 = withContext(Dispatchers.IO) {
-                    appContext.assets.open("contacts_seed.csv").use { stream ->
-                        CsvParser.parseStream(stream)
+                val (allContacts, allCatPaths) = withContext(Dispatchers.IO) {
+                    val s1 = appContext.assets.open("contacts_seed.csv").use { CsvParser.parseStream(it) }
+                    val s2 = appContext.assets.open("eaeat_2023_leader.csv").use {
+                        CsvParser.parseStream(it, defaultCategory = "الجامعة > الأكاديمية (EAEAT) > دفعة 2023")
                     }
+                    (s1.contacts + s2.contacts) to (s1.categoryPaths + s2.categoryPaths)
                 }
-                val summary2 = withContext(Dispatchers.IO) {
-                    appContext.assets.open("eaeat_2023_leader.csv").use { stream ->
-                        CsvParser.parseStream(stream, defaultCategory = "الجامعة > EAEAT")
-                    }
-                }
-                val allContacts = (summary1.contacts + summary2.contacts)
-                val allCatPaths = summary1.categoryPaths + summary2.categoryPaths
                 val result = persistImportedDataset(allContacts, allCatPaths, uploadToCloud)
                 prefs.setBundledImported(true)
-                _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال (${result.categoriesCreated} فئة، ${result.geoMatchedCount} موقع جغرافي)"
+                _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال (${result.categoriesCreated} فئة متداخلة، ${result.geoMatchedCount} على الخريطة)"
             } catch (e: Exception) {
                 _statusMessage.value = "فشل الاستيراد: ${e.localizedMessage}"
+            } finally {
+                _isBusy.value = false
+                _importProgressText.value = null
+            }
+        }
+    }
+
+    fun importDevicePhonebookContacts(uploadToCloud: Boolean = true) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            _importProgressText.value = "جاري استيراد كل جهات الاتصال من سجل الهاتف (People)..."
+            try {
+                val res = deviceContactsManager.readAllDeviceContacts()
+                res.onSuccess { (contacts, cats) ->
+                    if (contacts.isEmpty()) {
+                        _statusMessage.value = "لم يتم العثور على جهات اتصال في الهاتف"
+                    } else {
+                        val summary = persistImportedDataset(contacts, cats, uploadToCloud)
+                        _statusMessage.value = "تم استيراد ${summary.importedCount} جهة من الهاتف وتصنيفهم في ${summary.categoriesCreated} فئة"
+                    }
+                }.onFailure { err ->
+                    _statusMessage.value = "تعذر الاستيراد من الهاتف: ${err.localizedMessage}"
+                }
+            } finally {
+                _isBusy.value = false
+                _importProgressText.value = null
+            }
+        }
+    }
+
+    fun scanGoogleDriveWithToken(accessToken: String) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            _importProgressText.value = "جاري البحث داخل Google Drive عن جداول وملفات بها أرقام..."
+            try {
+                val outcomeRes = GoogleDriveScanner.scanAndExtractContacts(accessToken)
+                outcomeRes.onSuccess { outcome ->
+                    if (outcome.contacts.isEmpty()) {
+                        _statusMessage.value = "لم يتم العثور على أرقام جديدة داخل ملفات Google Drive النصية/الجداول"
+                    } else {
+                        val summary = persistImportedDataset(outcome.contacts, outcome.categoryPaths, uploadToCloud = true)
+                        _statusMessage.value = "تم استخراج ${summary.importedCount} رقم من ${outcome.filesScanned} ملف في Google Drive"
+                    }
+                }.onFailure { err ->
+                    _statusMessage.value = "خطأ Google Drive: ${err.localizedMessage}"
+                }
             } finally {
                 _isBusy.value = false
                 _importProgressText.value = null
@@ -544,23 +699,89 @@ class RabtaViewModel(
             _isBusy.value = true
             _importProgressText.value = "جاري تحليل الملف..."
             try {
-                val isVcf = fileName?.endsWith(".vcf", ignoreCase = true) == true
                 val parsed = withContext(Dispatchers.IO) {
                     appContext.contentResolver.openInputStream(uri)?.use { stream ->
-                        if (isVcf) {
-                            val text = stream.bufferedReader().readText()
-                            val vcards = VCardUtils.parseVCards(text)
-                            val cats = vcards.flatMap { it.categoryPaths }.toSet()
-                            CsvParser.ParsedDataset(vcards, 0, cats)
-                        } else {
-                            CsvParser.parseStream(stream)
-                        }
+                        val text = stream.bufferedReader().readText()
+                        CsvParser.parseArbitrarySheetOrText(text, fileName ?: "ملف مستورد")
                     } ?: CsvParser.ParsedDataset(emptyList(), 0, emptySet())
                 }
-                val result = persistImportedDataset(parsed.contacts, parsed.categoryPaths, uploadToCloud)
-                _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال بنجاح"
+                if (parsed.contacts.isEmpty()) {
+                    _statusMessage.value = "لم يتم العثور على جهات اتصال صالحة في الملف"
+                } else {
+                    val result = persistImportedDataset(parsed.contacts, parsed.categoryPaths, uploadToCloud)
+                    _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال بنجاح"
+                }
             } catch (e: Exception) {
                 _statusMessage.value = "تعذر قراءة الملف: ${e.localizedMessage}"
+            } finally {
+                _isBusy.value = false
+                _importProgressText.value = null
+            }
+        }
+    }
+
+    /**
+     * Re-processes all existing local contacts through SmartCategoryEngine + expanded EgyptGeoLookup
+     * to merge duplicate labels, create nested folders, and populate Map pins immediately.
+     */
+    fun reorganizeAllCategories() {
+        viewModelScope.launch {
+            _isBusy.value = true
+            _importProgressText.value = "جاري دمج الفئات المكررة وبناء الشجرة المتداخلة وإحداثيات الخريطة..."
+            try {
+                val stats = withContext(Dispatchers.IO) {
+                    val total = contactDao.getTotalCount()
+                    val allCatPaths = LinkedHashSet<String>()
+                    val updatedEntities = ArrayList<ContactEntity>(total)
+                    var offset = 0
+                    val pageSize = 1000
+                    while (true) {
+                        val page = contactDao.getRecentOrAllPage(limit = pageSize, offset = offset)
+                        if (page.isEmpty()) break
+                        for (entity in page) {
+                            val domain = entity.toDomain()
+                            val (nestedCats, starred) = SmartCategoryEngine.normalizeAndNestLabels(
+                                rawLabels = domain.categoryPaths,
+                                displayName = domain.displayName,
+                                phones = domain.phones,
+                                emails = domain.emails,
+                                organization = domain.organization,
+                                jobTitle = domain.jobTitle,
+                                notes = domain.notes,
+                                address = domain.address,
+                            )
+                            nestedCats.forEach { CsvParser.addHierarchySegments(it, allCatPaths) }
+                            val geo = if (domain.latitude == null || domain.longitude == null) {
+                                EgyptGeoLookup.inferLocation(domain.address, domain.district, domain.displayName, domain.notes, nestedCats.joinToString(" "))
+                                    ?: domain.primaryPhone.takeIf { it.isNotBlank() }?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
+                            } else null
+
+                            val updatedDomain = domain.copy(
+                                categoryPaths = nestedCats,
+                                isFavorite = domain.isFavorite || starred,
+                                district = domain.district ?: geo?.key,
+                                latitude = domain.latitude ?: geo?.lat,
+                                longitude = domain.longitude ?: geo?.lng,
+                            )
+                            updatedEntities += ContactEntity.fromDomain(updatedDomain)
+                        }
+                        offset += page.size
+                    }
+
+                    val catNodes = buildCategoryNodes(allCatPaths)
+                    val catEntities = catNodes.map {
+                        CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
+                    }
+                    contactDao.clearCategoryRefs()
+                    contactDao.clearPhoneKeys()
+                    categoryDao.clearAll()
+                    contactDao.upsertBatchWithIndexes(updatedEntities, catEntities, categoryDao)
+                    updatedEntities.size to catEntities.size
+                }
+                loadCategoryLevel("")
+                refreshCallLogs()
+                launch { RabtaWidget.refreshAll(appContext) }
+                _statusMessage.value = "تمت إعادة تنظيم ${stats.first} رقم داخل ${stats.second} فئة متداخلة بسلاسة"
             } finally {
                 _isBusy.value = false
                 _importProgressText.value = null
@@ -573,30 +794,37 @@ class RabtaViewModel(
         catPaths: Set<String>,
         uploadToCloud: Boolean,
     ): CsvImportSummary {
-        _importProgressText.value = "فهرسة ${contacts.size} جهة اتصال محلياً..."
+        _importProgressText.value = "فهرسة ${contacts.size} جهة اتصال محلياً في قاعدة Room السريعة..."
         val entities = contacts.map { ContactEntity.fromDomain(it) }
-        val catNodes = buildCategoryNodes(catPaths)
-
-        withContext(Dispatchers.IO) {
-            entities.chunked(500).forEach { chunk ->
-                contactDao.upsertAll(chunk)
-            }
-            categoryDao.upsertAll(
-                catNodes.map { CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey) }
-            )
+        val allCats = LinkedHashSet(catPaths)
+        contacts.forEach { c -> c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, allCats) } }
+        val catNodes = buildCategoryNodes(allCats)
+        val catEntities = catNodes.map {
+            CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
         }
 
-        if (uploadToCloud && contacts.isNotEmpty()) {
-            _importProgressText.value = "رفع البيانات إلى السحابة (0 / ${contacts.size})..."
-            firestoreRepo.upsertCategories(currentUserId, catNodes)
-            firestoreRepo.batchUpsertContacts(currentUserId, contacts) { done, total ->
-                _importProgressText.value = "جاري المزامنة السحابية ($done / $total)..."
-            }
-            prefs.setLastSyncMs(System.currentTimeMillis())
+        withContext(Dispatchers.IO) {
+            contactDao.upsertBatchWithIndexes(entities, catEntities, categoryDao)
         }
 
         loadCategoryLevel(_currentCategoryPath.value)
         refreshCallLogs()
+        viewModelScope.launch { RabtaWidget.refreshAll(appContext) }
+
+        if (uploadToCloud && contacts.isNotEmpty()) {
+            cloudUploadJob?.cancel()
+            cloudUploadJob = viewModelScope.launch {
+                _cloudSyncStatus.value = "نسخ احتياطي سحابي في الخلفية (0 / ${contacts.size})..."
+                runCatching {
+                    firestoreRepo.upsertCategories(currentUserId, catNodes)
+                    firestoreRepo.batchUpsertContacts(currentUserId, contacts) { done, total ->
+                        _cloudSyncStatus.value = "النسخ السحابي في الخلفية ($done / $total)"
+                    }
+                    prefs.setLastSyncMs(System.currentTimeMillis())
+                }
+                _cloudSyncStatus.value = null
+            }
+        }
 
         return CsvImportSummary(
             importedCount = contacts.size,
@@ -618,25 +846,23 @@ class RabtaViewModel(
                     val res = firestoreRepo.pullContactsPage(currentUserId, limit = 500, lastSnapshot = cursor)
                     val (page, nextCursor) = res.getOrThrow()
                     if (page.isEmpty()) break
+                    page.forEach { c -> c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, discoveredCats) } }
+                    val catNodes = buildCategoryNodes(discoveredCats)
                     withContext(Dispatchers.IO) {
-                        contactDao.upsertAll(page.map { ContactEntity.fromDomain(it) })
+                        contactDao.upsertBatchWithIndexes(
+                            contacts = page.map { ContactEntity.fromDomain(it) },
+                            catEntities = catNodes.map { CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey) },
+                            categoryDao = categoryDao,
+                        )
                     }
-                    page.forEach { discoveredCats.addAll(it.categoryPaths) }
                     total += page.size
                     _importProgressText.value = "تم سحب $total جهة اتصال..."
                     if (page.size < 500 || nextCursor == null) break
                     cursor = nextCursor
                 }
-                if (discoveredCats.isNotEmpty()) {
-                    val nodes = buildCategoryNodes(discoveredCats)
-                    withContext(Dispatchers.IO) {
-                        categoryDao.upsertAll(nodes.map {
-                            CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
-                        })
-                    }
-                }
                 prefs.setLastSyncMs(System.currentTimeMillis())
                 loadCategoryLevel(_currentCategoryPath.value)
+                launch { RabtaWidget.refreshAll(appContext) }
                 _statusMessage.value = "تمت المزامنة: $total جهة اتصال"
             } catch (e: Exception) {
                 _statusMessage.value = "تعذرت المزامنة: ${e.localizedMessage}"
@@ -645,6 +871,214 @@ class RabtaViewModel(
                 _importProgressText.value = null
             }
         }
+    }
+
+    // --- Gemini AI Command Execution & Smart Batch Classification ---
+
+    fun resetAiState() {
+        _aiUiState.value = AiAssistantUiState.Idle
+    }
+
+    fun runAiCommand(
+        userPrompt: String,
+        onNavigateToCategory: (String) -> Unit,
+        onNavigateToMap: () -> Unit,
+    ) {
+        val clean = userPrompt.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch {
+            _aiUiState.value = AiAssistantUiState.Loading
+            try {
+                val topCats = withContext(Dispatchers.IO) {
+                    categoryDao.getChildren("").map { it.name }
+                }
+                val planRes = aiAssistant.parseCommand(clean, topCats)
+                val plan = planRes.getOrElse { err ->
+                    _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "تعذر الاتصال بـ Gemini AI")
+                    return@launch
+                }
+
+                when (plan.action) {
+                    AiCommandAction.ADD_CONTACT -> {
+                        val name = plan.newContactName.ifBlank { plan.queryNameOrPhone }
+                        val phone = PhoneUtils.normalizePhone(plan.newContactPhone)
+                        if (phone.isNotBlank() || name.isNotBlank()) {
+                            val newRecord = ContactRecord(
+                                displayName = name.ifBlank { phone },
+                                primaryPhone = phone,
+                                phones = listOfNotNull(phone.takeIf { it.isNotBlank() }),
+                                categoryPaths = listOfNotNull(plan.categoryPath.takeIf { it.isNotBlank() }),
+                            )
+                            saveContact(newRecord)
+                            _aiUiState.value = AiAssistantUiState.Success(
+                                reply = plan.replyAr.ifBlank { "تم حفظ ${newRecord.displayName}" },
+                                actionBadge = "حفظ جهة اتصال",
+                                matchedContacts = listOf(newRecord),
+                            )
+                        } else {
+                            _aiUiState.value = AiAssistantUiState.Error("لم أتمكن من استخراج اسم أو رقم للحفظ")
+                        }
+                    }
+
+                    AiCommandAction.OPEN_CATEGORY -> {
+                        val target = plan.categoryPath.ifBlank { plan.queryNameOrPhone }
+                        val allCats = withContext(Dispatchers.IO) { categoryDao.getAll() }
+                        val matchedCat = allCats.firstOrNull {
+                            it.fullPath.equals(target, ignoreCase = true) ||
+                                it.fullPath.contains(target, ignoreCase = true) ||
+                                it.name.contains(target, ignoreCase = true)
+                        }
+                        if (matchedCat != null) {
+                            loadCategoryLevel(matchedCat.fullPath)
+                            onNavigateToCategory(matchedCat.fullPath)
+                            _aiUiState.value = AiAssistantUiState.Success(
+                                reply = plan.replyAr.ifBlank { "تم فتح قسم ${matchedCat.fullPath}" },
+                                actionBadge = "فتح قسم: ${matchedCat.name}",
+                            )
+                        } else {
+                            val results = findMatchesInRoom(target)
+                            _aiUiState.value = AiAssistantUiState.Success(
+                                reply = "لم أجد قسماً مطابقاً تماماً؛ إليك أقرب النتائج لـ '$target':",
+                                actionBadge = "نتائج البحث",
+                                matchedContacts = results,
+                            )
+                        }
+                    }
+
+                    AiCommandAction.MAP_DISTRICT -> {
+                        val q = plan.district.ifBlank { plan.queryNameOrPhone }
+                        val results = findMatchesInRoom(q)
+                        onNavigateToMap()
+                        _aiUiState.value = AiAssistantUiState.Success(
+                            reply = plan.replyAr.ifBlank { "تم فتح الخريطة لمنطقة $q (${results.size} نتيجة)" },
+                            actionBadge = "الخريطة: $q",
+                            matchedContacts = results,
+                        )
+                    }
+
+                    AiCommandAction.AUTO_CATEGORIZE -> {
+                        runAiAutoCategorizeBatch()
+                    }
+
+                    AiCommandAction.CALL, AiCommandAction.WHATSAPP, AiCommandAction.PAYMENT, AiCommandAction.SEARCH -> {
+                        val q = listOf(plan.queryNameOrPhone, plan.district)
+                            .filter { it.isNotBlank() }
+                            .joinToString(" ")
+                            .ifBlank { clean }
+                        val matches = findMatchesInRoom(q)
+                        if (matches.size == 1 && plan.action == AiCommandAction.CALL && matches.first().primaryPhone.isNotBlank()) {
+                            SystemIntents.dialPhone(appContext, matches.first().primaryPhone)
+                        } else if (matches.size == 1 && plan.action == AiCommandAction.WHATSAPP && matches.first().primaryPhone.isNotBlank()) {
+                            launchWhatsAppAndLog(matches.first(), matches.first().primaryPhone, plan.messageText.takeIf { it.isNotBlank() })
+                        }
+                        val badge = when (plan.action) {
+                            AiCommandAction.CALL -> "اتصال ذكي"
+                            AiCommandAction.WHATSAPP -> "واتساب ذكي"
+                            AiCommandAction.PAYMENT -> "تحويل مالي ${plan.amount}".trim()
+                            else -> "نتائج البحث (${matches.size})"
+                        }
+                        _aiUiState.value = AiAssistantUiState.Success(
+                            reply = if (matches.isEmpty()) "لم أجد جهات اتصال مطابقة لـ '$q'" else plan.replyAr,
+                            actionBadge = badge,
+                            matchedContacts = matches,
+                            suggestedMessage = plan.messageText.takeIf { it.isNotBlank() },
+                            paymentAmount = plan.amount.takeIf { it.isNotBlank() },
+                        )
+                    }
+
+                    AiCommandAction.ANSWER -> {
+                        val extraMatches = if (plan.queryNameOrPhone.isNotBlank()) findMatchesInRoom(plan.queryNameOrPhone) else emptyList()
+                        _aiUiState.value = AiAssistantUiState.Success(
+                            reply = plan.replyAr,
+                            actionBadge = "إجابة Gemini",
+                            matchedContacts = extraMatches,
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _aiUiState.value = AiAssistantUiState.Error(e.localizedMessage ?: "حدث خطأ غير متوقع")
+            }
+        }
+    }
+
+    fun runAiAutoCategorizeBatch() {
+        viewModelScope.launch {
+            _aiUiState.value = AiAssistantUiState.Loading
+            _isBusy.value = true
+            try {
+                val candidates = withContext(Dispatchers.IO) {
+                    contactDao.getAutoOrUnclassifiedContacts(limit = 40).map { it.toDomain() }
+                }
+                if (candidates.isEmpty()) {
+                    _aiUiState.value = AiAssistantUiState.Success(
+                        reply = "كل جهات اتصالك مصنفة بالفعل داخل فئات واضحة!",
+                        actionBadge = "مكتمل",
+                    )
+                    return@launch
+                }
+                val mapRes = aiAssistant.classifyContactBatch(candidates)
+                val assignments = mapRes.getOrElse { err ->
+                    _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "فشل التصنيف عبر Gemini")
+                    return@launch
+                }
+                if (assignments.isEmpty()) {
+                    _aiUiState.value = AiAssistantUiState.Error("لم يرجع Gemini تصنيفات لهذه الدفعة")
+                    return@launch
+                }
+
+                val newCatPaths = LinkedHashSet<String>()
+                val updatedContacts = ArrayList<ContactRecord>()
+                for (c in candidates) {
+                    val assignedPath = assignments[c.id] ?: continue
+                    val filteredOld = c.categoryPaths.filter { !it.startsWith("جهات اتصال تلقائية") }
+                    val merged = (filteredOld + assignedPath).distinct()
+                    merged.forEach { CsvParser.addHierarchySegments(it, newCatPaths) }
+                    updatedContacts += c.copy(categoryPaths = merged)
+                }
+
+                val catNodes = buildCategoryNodes(newCatPaths)
+                withContext(Dispatchers.IO) {
+                    contactDao.upsertBatchWithIndexes(
+                        contacts = updatedContacts.map { ContactEntity.fromDomain(it) },
+                        catEntities = catNodes.map { CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey) },
+                        categoryDao = categoryDao,
+                    )
+                }
+                loadCategoryLevel(_currentCategoryPath.value)
+                _aiUiState.value = AiAssistantUiState.Success(
+                    reply = "تم تصنيف ${updatedContacts.size} جهة اتصال بالذكاء الاصطناعي داخل ${catNodes.size} فئة متداخلة!",
+                    actionBadge = "تصنيف Gemini AI",
+                    matchedContacts = updatedContacts.take(10),
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _aiUiState.value = AiAssistantUiState.Error(e.localizedMessage ?: "تعذر التصنيف الذكي")
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    private suspend fun findMatchesInRoom(query: String): List<ContactRecord> = withContext(Dispatchers.IO) {
+        val tokens = query.trim().lowercase().split(" ").filter { it.isNotBlank() }
+        if (tokens.isEmpty()) return@withContext emptyList()
+        val primaryMatches = contactDao.searchContacts(tokens.first(), limit = 40, offset = 0).map { it.toDomain() }
+        if (tokens.size == 1) return@withContext primaryMatches.take(15)
+        val filtered = primaryMatches.filter { c ->
+            val hay = buildString {
+                append(c.displayName).append(' ')
+                append(c.primaryPhone).append(' ')
+                append(c.categoryPaths.joinToString(" ")).append(' ')
+                append(c.district.orEmpty()).append(' ')
+                append(c.address.orEmpty()).append(' ')
+                append(c.notes.orEmpty())
+            }.lowercase()
+            tokens.all { hay.contains(it) }
+        }
+        filtered.ifEmpty { primaryMatches }.take(15)
     }
 
     fun toggleBulkSelection(contactId: String) {
@@ -702,7 +1136,7 @@ class RabtaViewModel(
             withContext(Dispatchers.IO) {
                 paymentDao.upsert(PaymentTemplateEntity(tpl.id, tpl.name, tpl.urlTemplate, false))
             }
-            firestoreRepo.upsertPaymentTemplate(currentUserId, tpl)
+            launch { firestoreRepo.upsertPaymentTemplate(currentUserId, tpl) }
             _statusMessage.value = "تمت إضافة خدمة الدفع: ${tpl.name}"
         }
     }
@@ -710,7 +1144,7 @@ class RabtaViewModel(
     fun deletePaymentTemplate(templateId: String) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { paymentDao.deleteById(templateId) }
-            firestoreRepo.deletePaymentTemplate(currentUserId, templateId)
+            launch { firestoreRepo.deletePaymentTemplate(currentUserId, templateId) }
         }
     }
 
@@ -729,7 +1163,7 @@ class RabtaViewModel(
                     _statusMessage.value = if (info.isUpdateAvailable) {
                         "يتوفر تحديث جديد: ${info.tagName}"
                     } else {
-                        "التطبيق محدث على آخر إصدار (${info.tagName})"
+                        "المستودع متصل (${info.tagName})"
                     }
                 }.onFailure { err ->
                     _statusMessage.value = "تعذر فحص التحديثات: ${err.localizedMessage}"
