@@ -1,0 +1,199 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    function isValidStringList(listVal, maxLen) {
+      return listVal is list &&
+             listVal.size() <= maxLen &&
+             (listVal.size() == 0 || listVal[0] is string);
+    }
+
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 180)) &&
+             (!('githubRepoSlug' in data) || (data.githubRepoSlug is string && data.githubRepoSlug.size() <= 160)) &&
+             (!('lastSyncEpochMs' in data) || (data.lastSyncEpochMs is int && data.lastSyncEpochMs >= 0)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidContact(data) {
+      return data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 200 &&
+             data.primaryPhone is string && data.primaryPhone.size() <= 60 &&
+             isValidStringList(data.phones, 10) &&
+             isValidStringList(data.emails, 5) &&
+             isValidStringList(data.categoryPaths, 15) &&
+             (!('organization' in data) || (data.organization is string && data.organization.size() <= 200)) &&
+             (!('jobTitle' in data) || (data.jobTitle is string && data.jobTitle.size() <= 160)) &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 4000)) &&
+             (!('address' in data) || (data.address is string && data.address.size() <= 400)) &&
+             (!('district' in data) || (data.district is string && data.district.size() <= 120)) &&
+             (!('latitude' in data) || (data.latitude is number && data.latitude >= -90.0 && data.latitude <= 90.0)) &&
+             (!('longitude' in data) || (data.longitude is number && data.longitude >= -180.0 && data.longitude <= 180.0)) &&
+             (!('telegramHandle' in data) || (data.telegramHandle is string && data.telegramHandle.size() <= 100)) &&
+             (!('website' in data) || (data.website is string && data.website.size() <= 400)) &&
+             data.syncedToDevice is bool &&
+             data.isFavorite is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCategory(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+             data.parentPath is string && data.parentPath.size() <= 300 &&
+             data.fullPath is string && data.fullPath.size() >= 1 && data.fullPath.size() <= 400 &&
+             data.depth is int && data.depth >= 0 && data.depth <= 10 &&
+             (!('iconKey' in data) || (data.iconKey is string && data.iconKey.size() <= 60)) &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidWhatsAppLog(data) {
+      return data.contactId is string && data.contactId.size() >= 1 && data.contactId.size() <= 128 &&
+             data.contactName is string && data.contactName.size() >= 1 && data.contactName.size() <= 200 &&
+             data.phone is string && data.phone.size() >= 1 && data.phone.size() <= 60 &&
+             data.loggedAtEpochMs is int && data.loggedAtEpochMs >= 0 &&
+             data.syncedToPhone is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidPaymentTemplate(data) {
+      return data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+             data.urlTemplate is string && data.urlTemplate.size() >= 4 && data.urlTemplate.size() <= 400 &&
+             data.isDefault is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'email', 'githubRepoSlug', 'lastSyncEpochMs', 'createdAt', 'updatedAt']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'githubRepoSlug', 'lastSyncEpochMs', 'updatedAt']);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      match /contacts/{contactId} {
+        allow get: if isOwner(userId) && isValidId(contactId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(contactId) &&
+                         incoming().keys().hasAll(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
+                         isValidContact(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(contactId) &&
+                         isValidContact(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         (
+                           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['syncedToDevice', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['isFavorite', 'updatedAt'])
+                         );
+
+        allow delete: if isOwner(userId) && isValidId(contactId);
+      }
+
+      match /categories/{categoryId} {
+        allow get: if isOwner(userId) && isValidId(categoryId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(categoryId) &&
+                         incoming().keys().hasAll(['name', 'parentPath', 'fullPath', 'depth', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['name', 'parentPath', 'fullPath', 'depth', 'iconKey', 'createdAt', 'updatedAt']) &&
+                         isValidCategory(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(categoryId) &&
+                         isValidCategory(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'parentPath', 'fullPath', 'depth', 'iconKey', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(categoryId);
+      }
+
+      match /whatsapp_logs/{logId} {
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(logId) &&
+                         incoming().keys().hasAll(['contactId', 'contactName', 'phone', 'loggedAtEpochMs', 'syncedToPhone', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['contactId', 'contactName', 'phone', 'loggedAtEpochMs', 'syncedToPhone', 'createdAt', 'updatedAt']) &&
+                         isValidWhatsAppLog(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(logId) &&
+                         isValidWhatsAppLog(incoming()) &&
+                         incoming().contactId == existing().contactId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['syncedToPhone', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(logId);
+      }
+
+      match /payment_templates/{templateId} {
+        allow get: if isOwner(userId) && isValidId(templateId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(templateId) &&
+                         incoming().keys().hasAll(['name', 'urlTemplate', 'isDefault', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['name', 'urlTemplate', 'isDefault', 'createdAt', 'updatedAt']) &&
+                         isValidPaymentTemplate(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(templateId) &&
+                         isValidPaymentTemplate(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['name', 'urlTemplate', 'isDefault', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(templateId);
+      }
+    }
+  }
+}

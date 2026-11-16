@@ -1,0 +1,36 @@
+<resources>
+    <string name="app_name">Rabta Contacts</string>
+    <string name="tagline">مدير جهات الاتصال الذكي لـ 20,000+ رقم</string>
+    <string name="nav_home">الرئيسية</string>
+    <string name="nav_categories">الفئات</string>
+    <string name="nav_map">الخريطة</string>
+    <string name="nav_tools">المزامنة</string>
+    <string name="sign_in_title">مرحباً بك في رابطة</string>
+    <string name="sign_in_subtitle">إدارة ذكية وسريعة لـ 20,000+ رقم مع فئات متداخلة، تتبع واتساب، روابط دفع، وخريطة المواقع — بدون إثقال هاتفك.</string>
+    <string name="sign_in_google">تسجيل الدخول عبر Google</string>
+    <string name="search_hint">ابحث بالاسم، الرقم، الفئة، الملاحظات، أو المكان...</string>
+    <string name="frequent_callers_title">المتصل بهم كثيراً</string>
+    <string name="recent_calls_title">آخر المكالمات من السجل</string>
+    <string name="weekly_whatsapp_banner_title">مزامنة نشطي واتساب الأسبوعية</string>
+    <string name="add_contact">إضافة جهة اتصال</string>
+    <string name="capture_whatsapp">إضافة من واتساب</string>
+    <string name="import_bundled_csv">استيراد ملفاتك المرفقة</string>
+    <string name="import_file_csv_vcf">استيراد ملف CSV / vCard</string>
+    <string name="export_share_vcf">مشاركة كـ vCard</string>
+    <string name="export_share_csv">مشاركة كـ CSV</string>
+    <string name="scan_qr">مسح QR</string>
+    <string name="show_qr">عرض QR</string>
+    <string name="check_updates">فحص تحديثات GitHub</string>
+    <string name="grant_call_log">منح صلاحية سجل المكالمات</string>
+    <string name="grant_contacts_sync">منح صلاحية مزامنة الهاتف الانتقائية</string>
+    <string name="grant_location">تحديد موقعي على الخريطة</string>
+    <string name="grant_camera">منح صلاحية الكاميرا لمسح QR</string>
+    <string name="call_action">اتصال</string>
+    <string name="whatsapp_action">واتساب</string>
+    <string name="telegram_action">تيليجرام</string>
+    <string name="email_action">إيميل</string>
+    <string name="maps_action">الموقع</string>
+    <string name="website_action">موقع ويب</string>
+    <string name="sync_to_phone">حفظ بالهاتف</string>
+    <string name="remove_from_phone">إزالة من الهاتف</string>
+</resources>

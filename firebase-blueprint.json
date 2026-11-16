@@ -1,0 +1,110 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user account preferences and sync metadata.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "User display name." },
+        "email": { "type": "string", "description": "User email address." },
+        "githubRepoSlug": { "type": "string", "description": "Optional owner/repo slug for release update checks." },
+        "lastSyncEpochMs": { "type": "integer", "description": "Timestamp of last contact sync in epoch ms." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server timestamp on creation." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server timestamp on update." }
+      },
+      "required": ["userId", "displayName", "createdAt", "updatedAt"]
+    },
+    "ContactRecord": {
+      "title": "ContactRecord",
+      "description": "Cloud-backed smart contact entry supporting multiple channels, nested category paths, and coordinates.",
+      "type": "object",
+      "properties": {
+        "displayName": { "type": "string", "description": "Full contact display name." },
+        "primaryPhone": { "type": "string", "description": "Primary phone number or shortcode." },
+        "phones": { "type": "array", "description": "Bounded list of phone numbers (max 10)." },
+        "emails": { "type": "array", "description": "Bounded list of email addresses (max 5)." },
+        "categoryPaths": { "type": "array", "description": "Nested category paths using ' > ' delimiter (max 15)." },
+        "organization": { "type": "string", "description": "Company, university, or institution name." },
+        "jobTitle": { "type": "string", "description": "Role or job title." },
+        "notes": { "type": "string", "description": "Freeform notes and imported metadata." },
+        "address": { "type": "string", "description": "Formatted street or area address." },
+        "district": { "type": "string", "description": "District or neighborhood label." },
+        "latitude": { "type": "number", "description": "Optional latitude coordinate for map pins." },
+        "longitude": { "type": "number", "description": "Optional longitude coordinate for map pins." },
+        "telegramHandle": { "type": "string", "description": "Optional Telegram username or phone." },
+        "website": { "type": "string", "description": "Optional website URL." },
+        "syncedToDevice": { "type": "boolean", "description": "Whether synced selectively to Android device contacts." },
+        "isFavorite": { "type": "boolean", "description": "Pinned to quick access." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["displayName", "primaryPhone", "phones", "emails", "categoryPaths", "syncedToDevice", "isFavorite", "createdAt", "updatedAt"]
+    },
+    "CategoryNode": {
+      "title": "CategoryNode",
+      "description": "Hierarchical category node supporting multi-level nested folders.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Leaf folder display name." },
+        "parentPath": { "type": "string", "description": "Parent hierarchy path or empty string for root." },
+        "fullPath": { "type": "string", "description": "Complete hierarchical path delimited by ' > '." },
+        "depth": { "type": "integer", "description": "Nesting level starting at 0." },
+        "iconKey": { "type": "string", "description": "Icon identifier." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["name", "parentPath", "fullPath", "depth", "createdAt", "updatedAt"]
+    },
+    "WhatsAppLog": {
+      "title": "WhatsAppLog",
+      "description": "Timestamped record of WhatsApp interactions opened from the app.",
+      "type": "object",
+      "properties": {
+        "contactId": { "type": "string", "description": "Referenced contact ID." },
+        "contactName": { "type": "string", "description": "Contact display name at time of interaction." },
+        "phone": { "type": "string", "description": "Phone number dialed on WhatsApp." },
+        "loggedAtEpochMs": { "type": "integer", "description": "Epoch milliseconds of the interaction." },
+        "syncedToPhone": { "type": "boolean", "description": "Whether this contact has been synced to the phonebook." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["contactId", "contactName", "phone", "loggedAtEpochMs", "syncedToPhone", "createdAt", "updatedAt"]
+    },
+    "PaymentTemplate": {
+      "title": "PaymentTemplate",
+      "description": "Payment service link concatenation template (e.g., InstaPay, Orange Cash, Axis Pay).",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Payment service name." },
+        "urlTemplate": { "type": "string", "description": "Template containing {phone} placeholder for concatenation." },
+        "isDefault": { "type": "boolean", "description": "Built-in default service flag." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["name", "urlTemplate", "isDefault", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner profile and sync metadata."
+    },
+    "/users/{userId}/contacts/{contactId}": {
+      "schema": { "$ref": "#/entities/ContactRecord" },
+      "description": "User-scoped cloud contacts repository."
+    },
+    "/users/{userId}/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/CategoryNode" },
+      "description": "User-scoped nested category hierarchy."
+    },
+    "/users/{userId}/whatsapp_logs/{logId}": {
+      "schema": { "$ref": "#/entities/WhatsAppLog" },
+      "description": "User-scoped WhatsApp outreach logs for weekly selective phonebook sync."
+    },
+    "/users/{userId}/payment_templates/{templateId}": {
+      "schema": { "$ref": "#/entities/PaymentTemplate" },
+      "description": "User-scoped payment link concatenation templates."
+    }
+  }
+}
