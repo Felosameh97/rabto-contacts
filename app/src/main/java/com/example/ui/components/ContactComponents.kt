@@ -224,6 +224,15 @@ fun ContactSummaryCard(
                             )
                         }
                     }
+                    if (!contact.nickname.isNullOrBlank()) {
+                        Text(
+                            text = contact.nickname,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                     if (primary.isNotBlank()) {
                         Text(
                             text = primary,
@@ -234,8 +243,8 @@ fun ContactSummaryCard(
                     }
                     val subtitle = listOfNotNull(
                         contact.categoryPaths.firstOrNull(),
+                        contact.tags.take(3).takeIf { it.isNotEmpty() }?.joinToString(" • ") { "#$it" },
                         contact.district,
-                        contact.emails.firstOrNull(),
                     ).firstOrNull()
                     if (!subtitle.isNullOrBlank()) {
                         Text(
@@ -281,6 +290,7 @@ fun ContactDetailBottomSheet(
     onWhatsApp: (ContactRecord, String) -> Unit,
     onToggleDeviceSync: (ContactRecord) -> Unit,
     onAddPaymentTemplate: (String, String) -> Unit,
+    onSearchByTag: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -331,6 +341,13 @@ fun ContactDetailBottomSheet(
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(contact.displayName, style = MaterialTheme.typography.headlineSmall)
+                    if (!contact.nickname.isNullOrBlank()) {
+                        Text(
+                            text = contact.nickname,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                     val meta = listOfNotNull(contact.jobTitle, contact.organization).joinToString(" • ")
                     if (meta.isNotBlank()) {
                         Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -352,6 +369,18 @@ fun ContactDetailBottomSheet(
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     contact.categoryPaths.forEach { cat ->
                         AssistChip(onClick = {}, label = { Text(cat, style = MaterialTheme.typography.bodySmall) })
+                    }
+                }
+            }
+
+            if (contact.tags.isNotEmpty()) {
+                Text("التاجز (اضغط للبحث عن أشخاص مشابهين)", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    contact.tags.forEach { tag ->
+                        AssistChip(
+                            onClick = { onSearchByTag(tag) },
+                            label = { Text("#$tag", style = MaterialTheme.typography.labelMedium) },
+                        )
                     }
                 }
             }
@@ -817,6 +846,8 @@ fun ContactEditorDialog(
     onSave: (ContactRecord) -> Unit,
 ) {
     var displayName by remember { mutableStateOf(initialContact?.displayName.orEmpty()) }
+    var nickname by remember { mutableStateOf(initialContact?.nickname.orEmpty()) }
+    var tagsText by remember { mutableStateOf(initialContact?.tags?.joinToString(", ").orEmpty()) }
     var phonesText by remember {
         mutableStateOf(
             initialContact?.phones?.joinToString("\n")?.ifBlank { initialContact.primaryPhone }
@@ -846,16 +877,23 @@ fun ContactEditorDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(430.dp)
+                    .height(450.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 OutlinedTextField(
                     value = displayName,
                     onValueChange = { displayName = it },
-                    label = { Text("الاسم") },
+                    label = { Text("الاسم (English الأساسي)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth().testTag("editor_name_input"),
+                )
+                OutlinedTextField(
+                    value = nickname,
+                    onValueChange = { nickname = it },
+                    label = { Text("الاسم بالعربي / Nickname / الأسماء البديلة") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().testTag("editor_nickname_input"),
                 )
                 OutlinedTextField(
                     value = phonesText,
@@ -863,6 +901,13 @@ fun ContactEditorDialog(
                     label = { Text("الأرقام (رقم في كل سطر)") },
                     minLines = 2,
                     modifier = Modifier.fillMaxWidth().testTag("editor_phones_input"),
+                )
+                OutlinedTextField(
+                    value = tagsText,
+                    onValueChange = { tagsText = it },
+                    label = { Text("التاجز (مفصولة بفاصلة، مثال: EAEAT, 2023, دكتور)") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth().testTag("editor_tags_input"),
                 )
                 OutlinedTextField(
                     value = categoriesText,
@@ -953,15 +998,21 @@ fun ContactEditorDialog(
                         .map { raw -> raw.replace("/", ">").split(">").map { it.trim() }.filter { it.isNotBlank() }.joinToString(" > ") }
                         .filter { it.isNotBlank() }
                         .distinct()
+                    val customTags = tagsText.split(",", "،", "\n", "#")
+                        .map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .distinct()
                     val finalName = displayName.trim().ifBlank { phones.firstOrNull().orEmpty() }.ifBlank { emails.firstOrNull().orEmpty() }
                     if (finalName.isBlank()) return@Button
                     onSave(
                         (initialContact ?: ContactRecord()).copy(
                             displayName = finalName,
+                            nickname = nickname.trim().ifBlank { null },
                             primaryPhone = phones.firstOrNull().orEmpty(),
                             phones = phones,
                             emails = emails,
                             categoryPaths = cats,
+                            tags = customTags,
                             organization = organization.trim().ifBlank { null },
                             district = district.trim().ifBlank { null },
                             address = address.trim().ifBlank { null },

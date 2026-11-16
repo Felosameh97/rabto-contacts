@@ -32,10 +32,12 @@ data class UserProfile(
 data class ContactRecord(
     @DocumentId val id: String = "",
     val displayName: String = "",
+    val nickname: String? = null,
     val primaryPhone: String = "",
     val phones: List<String> = emptyList(),
     val emails: List<String> = emptyList(),
     val categoryPaths: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
     val organization: String? = null,
     val jobTitle: String? = null,
     val notes: String? = null,
@@ -52,10 +54,12 @@ data class ContactRecord(
 ) {
     fun toFirestoreMap(isCreate: Boolean): Map<String, Any> = buildMap {
         put("displayName", displayName.ifBlank { primaryPhone.ifBlank { "Unnamed" } }.take(200))
+        nickname?.takeIf { it.isNotBlank() }?.let { put("nickname", it.take(250)) }
         put("primaryPhone", primaryPhone.take(60))
         put("phones", phones.distinct().take(10))
         put("emails", emails.distinct().take(5))
         put("categoryPaths", categoryPaths.distinct().take(15))
+        put("tags", tags.distinct().take(20))
         organization?.takeIf { it.isNotBlank() }?.let { put("organization", it.take(200)) }
         jobTitle?.takeIf { it.isNotBlank() }?.let { put("jobTitle", it.take(160)) }
         notes?.takeIf { it.isNotBlank() }?.let { put("notes", it.take(4000)) }

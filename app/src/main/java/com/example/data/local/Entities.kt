@@ -22,10 +22,12 @@ import com.example.domain.model.WhatsAppLog
 data class ContactEntity(
     @PrimaryKey val id: String,
     val displayName: String,
+    val nickname: String? = null,
     val primaryPhone: String,
     val phonesJoined: String,
     val emailsJoined: String,
     val categoryPathsFlat: String,
+    val tagsJoined: String = "",
     val organization: String?,
     val jobTitle: String?,
     val notes: String?,
@@ -44,10 +46,12 @@ data class ContactEntity(
     fun toDomain(): ContactRecord = ContactRecord(
         id = id,
         displayName = displayName,
+        nickname = nickname,
         primaryPhone = primaryPhone,
         phones = phonesJoined.split("\u001F").filter { it.isNotBlank() },
         emails = emailsJoined.split("\u001F").filter { it.isNotBlank() },
         categoryPaths = categoryPathsFlat.split("\u001F").filter { it.isNotBlank() },
+        tags = tagsJoined.split("\u001F").filter { it.isNotBlank() },
         organization = organization,
         jobTitle = jobTitle,
         notes = notes,
@@ -62,28 +66,48 @@ data class ContactEntity(
     )
 
     companion object {
+        fun normalizeForSearch(raw: String): String {
+            return raw.lowercase()
+                .replace(Regex("[\\u064B-\\u065F\\u0670\\u0640]"), "")
+                .replace('أ', 'ا')
+                .replace('إ', 'ا')
+                .replace('آ', 'ا')
+                .replace('ى', 'ي')
+                .replace('ة', 'ه')
+                .replace('ؤ', 'و')
+                .replace('ئ', 'ي')
+        }
+
         fun fromDomain(record: ContactRecord, nowMs: Long = System.currentTimeMillis()): ContactEntity {
             val phones = record.phones.ifEmpty { listOfNotNull(record.primaryPhone.takeIf { it.isNotBlank() }) }
             val phonesJoined = phones.joinToString("\u001F")
             val emailsJoined = record.emails.joinToString("\u001F")
             val catsFlat = record.categoryPaths.joinToString("\u001F")
-            val blob = buildString {
-                append(record.displayName.lowercase()).append(' ')
+            val tagsJoined = record.tags.distinct().take(20).joinToString("\u001F")
+            val localPhones = phones.map { com.example.util.PhoneUtils.toLocalEgyptianPhone(it) }.distinct()
+            val rawBlob = buildString {
+                append(record.displayName).append(' ')
+                record.nickname?.let { append(it).append(' ') }
                 append(phones.joinToString(" ")).append(' ')
-                append(record.emails.joinToString(" ").lowercase()).append(' ')
-                append(record.categoryPaths.joinToString(" ").lowercase()).append(' ')
-                record.organization?.let { append(it.lowercase()).append(' ') }
-                record.district?.let { append(it.lowercase()).append(' ') }
-                record.address?.let { append(it.lowercase()).append(' ') }
-                record.notes?.let { append(it.lowercase()) }
+                append(localPhones.joinToString(" ")).append(' ')
+                append(record.emails.joinToString(" ")).append(' ')
+                append(record.tags.joinToString(" ")).append(' ')
+                append(record.categoryPaths.joinToString(" ")).append(' ')
+                record.organization?.let { append(it).append(' ') }
+                record.jobTitle?.let { append(it).append(' ') }
+                record.district?.let { append(it).append(' ') }
+                record.address?.let { append(it).append(' ') }
+                record.notes?.let { append(it) }
             }
             return ContactEntity(
                 id = record.id,
                 displayName = record.displayName,
+                nickname = record.nickname?.takeIf { it.isNotBlank() },
                 primaryPhone = record.primaryPhone.ifBlank { phones.firstOrNull().orEmpty() },
                 phonesJoined = phonesJoined,
                 emailsJoined = emailsJoined,
                 categoryPathsFlat = catsFlat,
+                tagsJoined = tagsJoined,
                 organization = record.organization,
                 jobTitle = record.jobTitle,
                 notes = record.notes,
@@ -95,7 +119,7 @@ data class ContactEntity(
                 website = record.website,
                 syncedToDevice = record.syncedToDevice,
                 isFavorite = record.isFavorite,
-                searchBlob = blob.take(2000),
+                searchBlob = normalizeForSearch(rawBlob).take(3200),
                 createdAtEpochMs = record.createdAt?.toDate()?.time ?: nowMs,
                 updatedAtEpochMs = record.updatedAt?.toDate()?.time ?: nowMs,
             )

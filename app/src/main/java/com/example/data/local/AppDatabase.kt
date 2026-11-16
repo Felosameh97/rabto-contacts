@@ -11,6 +11,8 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
@@ -25,7 +27,7 @@ import kotlinx.coroutines.flow.map
         WhatsAppLogEntity::class,
         PaymentTemplateEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class RabtaDatabase : RoomDatabase() {
@@ -38,6 +40,13 @@ abstract class RabtaDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: RabtaDatabase? = null
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE contacts ADD COLUMN nickname TEXT")
+                db.execSQL("ALTER TABLE contacts ADD COLUMN tagsJoined TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
         fun getInstance(context: Context): RabtaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -45,6 +54,7 @@ abstract class RabtaDatabase : RoomDatabase() {
                     RabtaDatabase::class.java,
                     "rabta_contacts.db"
                 )
+                    .addMigrations(MIGRATION_2_3)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

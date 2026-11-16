@@ -10,6 +10,9 @@ object VCardUtils {
         appendLine("VERSION:3.0")
         appendLine("FN:${escapeVCard(contact.displayName)}")
         appendLine("N:${escapeVCard(contact.displayName)};;;;")
+        contact.nickname?.takeIf { it.isNotBlank() }?.let {
+            appendLine("NICKNAME:${escapeVCard(it)}")
+        }
         contact.phones.ifEmpty { listOfNotNull(contact.primaryPhone.takeIf { it.isNotBlank() }) }
             .forEachIndexed { idx, phone ->
                 val type = if (idx == 0) "CELL" else "VOICE"
@@ -30,8 +33,9 @@ object VCardUtils {
         contact.website?.takeIf { it.isNotBlank() }?.let {
             appendLine("URL:$it")
         }
-        if (contact.categoryPaths.isNotEmpty()) {
-            appendLine("CATEGORIES:${contact.categoryPaths.joinToString(",") { escapeVCard(it) }}")
+        val catsAndTags = (contact.categoryPaths + contact.tags).distinct()
+        if (catsAndTags.isNotEmpty()) {
+            appendLine("CATEGORIES:${catsAndTags.joinToString(",") { escapeVCard(it) }}")
         }
         contact.notes?.takeIf { it.isNotBlank() }?.let {
             appendLine("NOTE:${escapeVCard(it)}")
@@ -53,6 +57,7 @@ object VCardUtils {
 
         return blocks.mapNotNull { block ->
             var fn = ""
+            var nickname: String? = null
             val phones = mutableListOf<String>()
             val emails = mutableListOf<String>()
             var org: String? = null
@@ -73,6 +78,7 @@ object VCardUtils {
 
                 when {
                     key == "FN" -> fn = unescapeVCard(value)
+                    key.startsWith("NICKNAME") -> nickname = unescapeVCard(value)
                     key.startsWith("N") && fn.isBlank() -> fn = value.split(";").filter { it.isNotBlank() }.joinToString(" ")
                     key.startsWith("TEL") -> {
                         val norm = PhoneUtils.normalizePhone(value)
@@ -97,21 +103,24 @@ object VCardUtils {
 
             if (fn.isBlank() && phones.isEmpty() && emails.isEmpty()) return@mapNotNull null
             val geo = if (lat == null || lng == null) EgyptGeoLookup.inferLocation(address, fn, note) else null
-            ContactRecord(
-                id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
-                displayName = fn.ifBlank { phones.firstOrNull().orEmpty() }.ifBlank { emails.firstOrNull().orEmpty() },
-                primaryPhone = phones.firstOrNull().orEmpty(),
-                phones = phones.distinct().take(10),
-                emails = emails.distinct().take(5),
-                categoryPaths = categories.distinct().take(15),
-                organization = org,
-                jobTitle = title,
-                notes = note,
-                address = address,
-                district = geo?.key,
-                latitude = lat ?: geo?.lat,
-                longitude = lng ?: geo?.lng,
-                website = website,
+            ContactDeduplicator.enrichSingleContact(
+                ContactRecord(
+                    id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
+                    displayName = fn.ifBlank { phones.firstOrNull().orEmpty() }.ifBlank { emails.firstOrNull().orEmpty() },
+                    nickname = nickname,
+                    primaryPhone = phones.firstOrNull().orEmpty(),
+                    phones = phones.distinct().take(10),
+                    emails = emails.distinct().take(5),
+                    categoryPaths = categories.distinct().take(15),
+                    organization = org,
+                    jobTitle = title,
+                    notes = note,
+                    address = address,
+                    district = geo?.key,
+                    latitude = lat ?: geo?.lat,
+                    longitude = lng ?: geo?.lng,
+                    website = website,
+                )
             )
         }
     }

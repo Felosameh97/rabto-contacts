@@ -135,6 +135,23 @@ class FirestoreContactsRepository(
         handleFirestoreError(e, OperationType.DELETE, "users/$uid/contacts/$contactId")
     }
 
+    suspend fun batchDeleteContacts(uid: String, contactIds: List<String>): Result<Int> = runCatching {
+        if (contactIds.isEmpty()) return@runCatching 0
+        var deleted = 0
+        for (chunk in contactIds.distinct().chunked(400)) {
+            val batch = db.batch()
+            for (cid in chunk) {
+                batch.delete(contactsCol(uid).document(cid))
+            }
+            batch.commit().await()
+            deleted += chunk.size
+        }
+        deleted
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.DELETE, "users/$uid/contacts")
+    }
+
     suspend fun getContactById(uid: String, contactId: String): Result<ContactRecord?> = runCatching {
         val snap = contactsCol(uid).document(contactId).get().await()
         if (snap.exists()) {

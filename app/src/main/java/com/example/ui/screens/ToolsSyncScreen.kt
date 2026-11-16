@@ -126,6 +126,7 @@ fun ToolsSyncScreen(
     onCheckGithubUpdates: (String) -> Unit,
     onPermissionsChanged: () -> Unit,
     onSignOut: () -> Unit,
+    onRunAiBilingualEnrich: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -490,7 +491,7 @@ fun ToolsSyncScreen(
                         ) {
                             Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("دمج وتنظيم الفئات")
+                            Text("منع التكرار + English + Tags")
                         }
                         OutlinedButton(
                             onClick = { onShareExport(true) },
@@ -502,13 +503,24 @@ fun ToolsSyncScreen(
                         }
                     }
 
-                    OutlinedButton(
-                        onClick = onOpenQrScanner,
-                        modifier = Modifier.fillMaxWidth().testTag("tools_scan_qr_btn"),
-                    ) {
-                        Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("مسح بطاقة QR")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = onRunAiBilingualEnrich,
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).testTag("tools_ai_bilingual_btn"),
+                        ) {
+                            Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("تاجز وترجمة Gemini")
+                        }
+                        OutlinedButton(
+                            onClick = onOpenQrScanner,
+                            modifier = Modifier.weight(1f).testTag("tools_scan_qr_btn"),
+                        ) {
+                            Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("مسح QR")
+                        }
                     }
                 }
             }

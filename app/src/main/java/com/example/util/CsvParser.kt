@@ -102,17 +102,19 @@ object CsvParser {
             smartCats.forEach { addHierarchySegments(it, categories) }
             val geo = EgyptGeoLookup.inferLocation(name, sourceTitle) ?: EgyptGeoLookup.inferLocationFromPhone(matches.first())
 
-            contacts += ContactRecord(
-                id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
-                displayName = name,
-                primaryPhone = matches.first(),
-                phones = matches,
-                emails = listOfNotNull(emailMatch),
-                categoryPaths = smartCats,
-                district = geo?.key,
-                latitude = geo?.lat,
-                longitude = geo?.lng,
-                isFavorite = starred,
+            contacts += ContactDeduplicator.enrichSingleContact(
+                ContactRecord(
+                    id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
+                    displayName = name,
+                    primaryPhone = matches.first(),
+                    phones = matches,
+                    emails = listOfNotNull(emailMatch),
+                    categoryPaths = smartCats,
+                    district = geo?.key,
+                    latitude = geo?.lat,
+                    longitude = geo?.lng,
+                    isFavorite = starred,
+                )
             )
         }
         return ParsedDataset(contacts, 0, categories)
@@ -207,24 +209,28 @@ object CsvParser {
             val geoMatch = EgyptGeoLookup.inferLocation(address, rawName, notes, rawLabels.joinToString(" "))
                 ?: phones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
             val contactId = "c_" + UUID.randomUUID().toString().replace("-", "").take(16)
-
-            contacts += ContactRecord(
-                id = contactId,
-                displayName = rawName.take(200),
-                primaryPhone = phones.firstOrNull().orEmpty(),
-                phones = phones,
-                emails = emails,
-                categoryPaths = nestedCategories,
-                organization = org.ifBlank { null },
-                jobTitle = title.ifBlank { null },
-                notes = notes.ifBlank { null },
-                address = address,
-                district = geoMatch?.key,
-                latitude = geoMatch?.lat,
-                longitude = geoMatch?.lng,
-                website = website,
-                isFavorite = isStarred,
+            val enriched = ContactDeduplicator.enrichSingleContact(
+                ContactRecord(
+                    id = contactId,
+                    displayName = rawName.take(200),
+                    nickname = nickname.ifBlank { null },
+                    primaryPhone = phones.firstOrNull().orEmpty(),
+                    phones = phones,
+                    emails = emails,
+                    categoryPaths = nestedCategories,
+                    organization = org.ifBlank { null },
+                    jobTitle = title.ifBlank { null },
+                    notes = notes.ifBlank { null },
+                    address = address,
+                    district = geoMatch?.key,
+                    latitude = geoMatch?.lat,
+                    longitude = geoMatch?.lng,
+                    website = website,
+                    isFavorite = isStarred,
+                )
             )
+            enriched.categoryPaths.forEach { addHierarchySegments(it, categories) }
+            contacts += enriched
         }
 
         return ParsedDataset(contacts, skipped, categories)
@@ -297,20 +303,24 @@ object CsvParser {
             nestedCats.forEach { addHierarchySegments(it, categories) }
 
             val geo = EgyptGeoLookup.inferLocation(displayName, fullPath, "eaeat")
-            contacts += ContactRecord(
-                id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
-                displayName = displayName.take(200),
-                primaryPhone = normalizedPhone,
-                phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
-                emails = listOfNotNull(rawEmail.takeIf { it.contains("@") }),
-                categoryPaths = nestedCats,
-                organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
-                notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
-                district = geo?.key,
-                latitude = geo?.lat,
-                longitude = geo?.lng,
-                isFavorite = starred,
+            val enriched = ContactDeduplicator.enrichSingleContact(
+                ContactRecord(
+                    id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
+                    displayName = displayName.take(200),
+                    primaryPhone = normalizedPhone,
+                    phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
+                    emails = listOfNotNull(rawEmail.takeIf { it.contains("@") }),
+                    categoryPaths = nestedCats,
+                    organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
+                    notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
+                    district = geo?.key,
+                    latitude = geo?.lat,
+                    longitude = geo?.lng,
+                    isFavorite = starred,
+                )
             )
+            enriched.categoryPaths.forEach { addHierarchySegments(it, categories) }
+            contacts += enriched
         }
         return ParsedDataset(contacts, skipped, categories)
     }
@@ -397,14 +407,16 @@ object CsvParser {
 
     fun exportToCsv(contacts: List<ContactRecord>): String {
         val sb = StringBuilder()
-        sb.appendLine("First Name,Organization Name,Organization Title,Notes,Labels,E-mail 1 - Value,Phone 1 - Value,Address 1 - Formatted,Website 1 - Value")
+        sb.appendLine("First Name,Nickname,Organization Name,Organization Title,Notes,Labels,Tags,E-mail 1 - Value,Phone 1 - Value,Address 1 - Formatted,Website 1 - Value")
         for (c in contacts) {
             val cols = listOf(
                 c.displayName,
+                c.nickname.orEmpty(),
                 c.organization.orEmpty(),
                 c.jobTitle.orEmpty(),
                 c.notes.orEmpty(),
                 c.categoryPaths.joinToString(" ::: "),
+                c.tags.joinToString(" ::: "),
                 c.emails.joinToString(" ::: "),
                 c.phones.joinToString(" ::: "),
                 c.address.orEmpty(),

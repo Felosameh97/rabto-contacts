@@ -29,6 +29,7 @@ import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
+import com.example.util.ContactDeduplicator
 import com.example.util.CsvParser
 import com.example.util.EgyptGeoLookup
 import com.example.util.PaymentUtils
@@ -356,9 +357,9 @@ class RabtaViewModel(
         }
         searchJob = viewModelScope.launch {
             delay(150L)
-            val cleaned = query.trim().lowercase()
+            val cleaned = ContactEntity.normalizeForSearch(query.trim())
             val results = withContext(Dispatchers.IO) {
-                contactDao.searchContacts(cleaned, limit = 60, offset = 0).map { it.toDomain() }
+                contactDao.searchContacts(cleaned, limit = 80, offset = 0).map { it.toDomain() }
             }
             _searchResults.value = results
         }
@@ -366,7 +367,7 @@ class RabtaViewModel(
 
     fun searchForDialpad(query: String) {
         dialpadJob?.cancel()
-        val trimmed = query.trim().lowercase()
+        val trimmed = ContactEntity.normalizeForSearch(query.trim())
         if (trimmed.isEmpty()) {
             _dialpadMatches.value = emptyList()
             return
@@ -458,57 +459,57 @@ class RabtaViewModel(
     fun saveContact(contact: ContactRecord, syncToCloud: Boolean = true) {
         viewModelScope.launch {
             val id = contact.id.ifBlank { "c_" + UUID.randomUUID().toString().replace("-", "").take(16) }
-            val normalizedPhones = (listOf(contact.primaryPhone) + contact.phones)
-                .map { PhoneUtils.normalizePhone(it) }
-                .filter { it.isNotBlank() }
+            val incoming = ContactDeduplicator.enrichSingleContact(contact.copy(id = id))
+            val phoneKeys = incoming.phones
+                .map { PhoneUtils.phoneSearchKey(it) }
+                .filter { it.length >= 7 }
                 .distinct()
-                .take(10)
-            val geo = if (contact.latitude == null || contact.longitude == null) {
-                EgyptGeoLookup.inferLocation(contact.address, contact.district, contact.displayName, contact.categoryPaths.joinToString(" "))
-                    ?: normalizedPhones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
-            } else null
 
-            val cats = if (contact.categoryPaths.isEmpty()) {
-                SmartCategoryEngine.normalizeAndNestLabels(
-                    rawLabels = emptyList(),
-                    displayName = contact.displayName,
-                    phones = normalizedPhones,
-                    emails = contact.emails,
-                    organization = contact.organization,
-                    jobTitle = contact.jobTitle,
-                    notes = contact.notes,
-                    address = contact.address,
-                ).first
-            } else contact.categoryPaths
-
-            val cleaned = contact.copy(
-                id = id,
-                primaryPhone = normalizedPhones.firstOrNull().orEmpty(),
-                phones = normalizedPhones,
-                categoryPaths = cats,
-                district = contact.district ?: geo?.key,
-                latitude = contact.latitude ?: geo?.lat,
-                longitude = contact.longitude ?: geo?.lng,
-            )
-
+            var mergedWinner = incoming
+            var supersededIds: List<String> = emptyList()
+            var didMergeDuplicate = false
             var catNodesToSync: List<CategoryNode> = emptyList()
+
             withContext(Dispatchers.IO) {
-                contactDao.upsertSingleWithIndexes(ContactEntity.fromDomain(cleaned))
-                if (cleaned.categoryPaths.isNotEmpty()) {
-                    catNodesToSync = buildCategoryNodes(cleaned.categoryPaths.toSet())
+                val existingMatches = if (phoneKeys.isNotEmpty()) {
+                    contactDao.findAllByPhoneKeys(phoneKeys)
+                        .map { it.contact.toDomain() }
+                        .distinctBy { it.id }
+                        .filter { it.id != incoming.id }
+                } else emptyList()
+
+                if (existingMatches.isNotEmpty()) {
+                    didMergeDuplicate = true
+                    val dedup = ContactDeduplicator.deduplicateAndMerge(existingMatches + incoming)
+                    mergedWinner = dedup.mergedContacts.firstOrNull() ?: incoming
+                    supersededIds = (dedup.supersededIds + incoming.id + existingMatches.map { it.id })
+                        .filter { it != mergedWinner.id }
+                        .distinct()
+                    if (supersededIds.isNotEmpty()) {
+                        contactDao.deleteContactsWithIndexes(supersededIds)
+                    }
+                }
+
+                contactDao.upsertSingleWithIndexes(ContactEntity.fromDomain(mergedWinner))
+                if (mergedWinner.categoryPaths.isNotEmpty()) {
+                    catNodesToSync = buildCategoryNodes(mergedWinner.categoryPaths.toSet())
                     categoryDao.upsertAll(catNodesToSync.map {
                         CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
                     })
                 }
             }
+
             if (syncToCloud) {
                 if (catNodesToSync.isNotEmpty()) {
                     launch { firestoreRepo.upsertCategories(currentUserId, catNodesToSync) }
                 }
-                launch { firestoreRepo.upsertContact(currentUserId, cleaned) }
+                if (supersededIds.isNotEmpty()) {
+                    launch { firestoreRepo.batchDeleteContacts(currentUserId, supersededIds) }
+                }
+                launch { firestoreRepo.upsertContact(currentUserId, mergedWinner) }
             }
-            if (_selectedContact.value?.id == cleaned.id) {
-                _selectedContact.value = cleaned
+            if (_selectedContact.value?.id == mergedWinner.id || supersededIds.contains(_selectedContact.value?.id)) {
+                _selectedContact.value = mergedWinner
             }
             loadCategoryLevel(_currentCategoryPath.value)
             if (_searchQuery.value.isNotBlank()) {
@@ -516,7 +517,11 @@ class RabtaViewModel(
             }
             refreshCallLogs()
             launch { RabtaWidget.refreshAll(appContext) }
-            _statusMessage.value = "تم حفظ جهة الاتصال: ${cleaned.displayName}"
+            _statusMessage.value = if (didMergeDuplicate) {
+                "تم منع التكرار ودمج البيانات في: ${mergedWinner.displayName}"
+            } else {
+                "تم حفظ جهة الاتصال: ${mergedWinner.displayName}"
+            }
         }
     }
 
@@ -721,67 +726,59 @@ class RabtaViewModel(
     }
 
     /**
-     * Re-processes all existing local contacts through SmartCategoryEngine + expanded EgyptGeoLookup
-     * to merge duplicate labels, create nested folders, and populate Map pins immediately.
+     * Full-database anti-duplicate merge + nested category builder + English primary / Arabic nickname
+     * normalization + searchable bilingual tags across ALL stored contacts.
      */
     fun reorganizeAllCategories() {
         viewModelScope.launch {
             _isBusy.value = true
-            _importProgressText.value = "جاري دمج الفئات المكررة وبناء الشجرة المتداخلة وإحداثيات الخريطة..."
+            _importProgressText.value = "جاري فحص ودمج كل الأسماء المكررة، توحيد English/العربي، وبناء التاجز..."
             try {
-                val stats = withContext(Dispatchers.IO) {
+                val outcome = withContext(Dispatchers.IO) {
                     val total = contactDao.getTotalCount()
-                    val allCatPaths = LinkedHashSet<String>()
-                    val updatedEntities = ArrayList<ContactEntity>(total)
+                    val allDomains = ArrayList<ContactRecord>(total)
                     var offset = 0
                     val pageSize = 1000
                     while (true) {
                         val page = contactDao.getRecentOrAllPage(limit = pageSize, offset = offset)
                         if (page.isEmpty()) break
-                        for (entity in page) {
-                            val domain = entity.toDomain()
-                            val (nestedCats, starred) = SmartCategoryEngine.normalizeAndNestLabels(
-                                rawLabels = domain.categoryPaths,
-                                displayName = domain.displayName,
-                                phones = domain.phones,
-                                emails = domain.emails,
-                                organization = domain.organization,
-                                jobTitle = domain.jobTitle,
-                                notes = domain.notes,
-                                address = domain.address,
-                            )
-                            nestedCats.forEach { CsvParser.addHierarchySegments(it, allCatPaths) }
-                            val geo = if (domain.latitude == null || domain.longitude == null) {
-                                EgyptGeoLookup.inferLocation(domain.address, domain.district, domain.displayName, domain.notes, nestedCats.joinToString(" "))
-                                    ?: domain.primaryPhone.takeIf { it.isNotBlank() }?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
-                            } else null
-
-                            val updatedDomain = domain.copy(
-                                categoryPaths = nestedCats,
-                                isFavorite = domain.isFavorite || starred,
-                                district = domain.district ?: geo?.key,
-                                latitude = domain.latitude ?: geo?.lat,
-                                longitude = domain.longitude ?: geo?.lng,
-                            )
-                            updatedEntities += ContactEntity.fromDomain(updatedDomain)
-                        }
+                        page.forEach { allDomains += it.toDomain() }
                         offset += page.size
                     }
 
+                    val dedup = ContactDeduplicator.deduplicateAndMerge(allDomains, enforceBilingual = true)
+                    val allCatPaths = LinkedHashSet<String>()
+                    dedup.mergedContacts.forEach { c ->
+                        c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, allCatPaths) }
+                    }
                     val catNodes = buildCategoryNodes(allCatPaths)
                     val catEntities = catNodes.map {
                         CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
                     }
+                    val updatedEntities = dedup.mergedContacts.map { ContactEntity.fromDomain(it) }
+
                     contactDao.clearCategoryRefs()
                     contactDao.clearPhoneKeys()
+                    contactDao.clearAll()
                     categoryDao.clearAll()
                     contactDao.upsertBatchWithIndexes(updatedEntities, catEntities, categoryDao)
-                    updatedEntities.size to catEntities.size
+                    Triple(dedup, catNodes, updatedEntities.size)
+                }
+
+                val dedup = outcome.first
+                val catNodes = outcome.second
+                if (dedup.supersededIds.isNotEmpty()) {
+                    launch { firestoreRepo.batchDeleteContacts(currentUserId, dedup.supersededIds) }
+                }
+                if (catNodes.isNotEmpty()) {
+                    launch { firestoreRepo.upsertCategories(currentUserId, catNodes) }
                 }
                 loadCategoryLevel("")
+                if (_searchQuery.value.isNotBlank()) updateSearchQuery(_searchQuery.value)
                 refreshCallLogs()
                 launch { RabtaWidget.refreshAll(appContext) }
-                _statusMessage.value = "تمت إعادة تنظيم ${stats.first} رقم داخل ${stats.second} فئة متداخلة بسلاسة"
+                _statusMessage.value =
+                    "تم منع التكرار: دمج ${dedup.totalDuplicatesRemoved} مكرر، والنتيجة ${outcome.third} جهة بأسماء English + عربي + تاجز"
             } finally {
                 _isBusy.value = false
                 _importProgressText.value = null
@@ -794,16 +791,45 @@ class RabtaViewModel(
         catPaths: Set<String>,
         uploadToCloud: Boolean,
     ): CsvImportSummary {
-        _importProgressText.value = "فهرسة ${contacts.size} جهة اتصال محلياً في قاعدة Room السريعة..."
-        val entities = contacts.map { ContactEntity.fromDomain(it) }
-        val allCats = LinkedHashSet(catPaths)
-        contacts.forEach { c -> c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, allCats) } }
+        _importProgressText.value = "منع التكرار وفهرسة ${contacts.size} جهة اتصال باللغتين والتاجز..."
+
+        val (finalMerged, supersededIds, allCats) = withContext(Dispatchers.IO) {
+            // 1) Deduplicate incoming batch internally
+            val internalDedup = ContactDeduplicator.deduplicateAndMerge(contacts, enforceBilingual = true)
+            val incomingKeys = internalDedup.mergedContacts
+                .flatMap { c -> (listOf(c.primaryPhone) + c.phones).map { PhoneUtils.phoneSearchKey(it) } }
+                .filter { it.length >= 7 }
+                .distinct()
+
+            // 2) Pull any existing contacts in Room that share phone keys to merge instead of duplicate
+            val existingMatched = if (incomingKeys.isNotEmpty()) {
+                incomingKeys.chunked(450).flatMap { chunk ->
+                    contactDao.findAllByPhoneKeys(chunk).map { it.contact.toDomain() }
+                }.distinctBy { it.id }
+            } else emptyList()
+
+            val fullDedup = ContactDeduplicator.deduplicateAndMerge(
+                existingMatched + internalDedup.mergedContacts,
+                enforceBilingual = true,
+            )
+
+            val catSet = LinkedHashSet(catPaths)
+            fullDedup.mergedContacts.forEach { c ->
+                c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, catSet) }
+            }
+            Triple(fullDedup.mergedContacts, fullDedup.supersededIds, catSet)
+        }
+
+        val entities = finalMerged.map { ContactEntity.fromDomain(it) }
         val catNodes = buildCategoryNodes(allCats)
         val catEntities = catNodes.map {
             CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
         }
 
         withContext(Dispatchers.IO) {
+            if (supersededIds.isNotEmpty()) {
+                contactDao.deleteContactsWithIndexes(supersededIds)
+            }
             contactDao.upsertBatchWithIndexes(entities, catEntities, categoryDao)
         }
 
@@ -811,13 +837,16 @@ class RabtaViewModel(
         refreshCallLogs()
         viewModelScope.launch { RabtaWidget.refreshAll(appContext) }
 
-        if (uploadToCloud && contacts.isNotEmpty()) {
+        if (uploadToCloud && finalMerged.isNotEmpty()) {
             cloudUploadJob?.cancel()
             cloudUploadJob = viewModelScope.launch {
-                _cloudSyncStatus.value = "نسخ احتياطي سحابي في الخلفية (0 / ${contacts.size})..."
+                _cloudSyncStatus.value = "نسخ احتياطي سحابي في الخلفية (0 / ${finalMerged.size})..."
                 runCatching {
+                    if (supersededIds.isNotEmpty()) {
+                        firestoreRepo.batchDeleteContacts(currentUserId, supersededIds)
+                    }
                     firestoreRepo.upsertCategories(currentUserId, catNodes)
-                    firestoreRepo.batchUpsertContacts(currentUserId, contacts) { done, total ->
+                    firestoreRepo.batchUpsertContacts(currentUserId, finalMerged) { done, total ->
                         _cloudSyncStatus.value = "النسخ السحابي في الخلفية ($done / $total)"
                     }
                     prefs.setLastSyncMs(System.currentTimeMillis())
@@ -827,10 +856,10 @@ class RabtaViewModel(
         }
 
         return CsvImportSummary(
-            importedCount = contacts.size,
-            skippedCount = 0,
+            importedCount = finalMerged.size,
+            skippedCount = supersededIds.size,
             categoriesCreated = catNodes.size,
-            geoMatchedCount = contacts.count { it.latitude != null },
+            geoMatchedCount = finalMerged.count { it.latitude != null },
         )
     }
 
@@ -1062,20 +1091,88 @@ class RabtaViewModel(
         }
     }
 
+    fun runAiBilingualEnrichBatch() {
+        viewModelScope.launch {
+            _aiUiState.value = AiAssistantUiState.Loading
+            _isBusy.value = true
+            try {
+                val candidates = withContext(Dispatchers.IO) {
+                    contactDao.getContactsNeedingBilingualOrTags(limit = 35)
+                        .ifEmpty { contactDao.getRecentOrAllPage(limit = 35, offset = 0) }
+                        .map { it.toDomain() }
+                }
+                if (candidates.isEmpty()) {
+                    _aiUiState.value = AiAssistantUiState.Success(
+                        reply = "لا توجد جهات اتصال متاحة للتحديث حالياً.",
+                        actionBadge = "فارغ",
+                    )
+                    return@launch
+                }
+                val enrichRes = aiAssistant.enrichContactsBilingualAndTags(candidates)
+                val map = enrichRes.getOrElse { err ->
+                    _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "تعذر التحديث الذكي عبر Gemini")
+                    return@launch
+                }
+                val updated = ArrayList<ContactRecord>()
+                for (c in candidates) {
+                    val item = map[c.id] ?: continue
+                    val combinedNick = listOfNotNull(
+                        item.arabicNickname.takeIf { it.isNotBlank() },
+                        c.nickname?.takeIf { it.isNotBlank() && it != item.arabicNickname },
+                        c.displayName.takeIf { it.isNotBlank() && !it.equals(item.englishName, true) },
+                    ).distinct().joinToString(" • ").take(240).ifBlank { null }
+
+                    val mergedTags = (c.tags + item.tags).map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
+                    updated += c.copy(
+                        displayName = item.englishName.take(200),
+                        nickname = combinedNick,
+                        tags = mergedTags,
+                    )
+                }
+                if (updated.isNotEmpty()) {
+                    withContext(Dispatchers.IO) {
+                        contactDao.upsertBatchWithIndexes(
+                            contacts = updated.map { ContactEntity.fromDomain(it) },
+                            catEntities = emptyList(),
+                            categoryDao = categoryDao,
+                        )
+                    }
+                    if (_searchQuery.value.isNotBlank()) updateSearchQuery(_searchQuery.value)
+                    loadCategoryLevel(_currentCategoryPath.value)
+                }
+                _aiUiState.value = AiAssistantUiState.Success(
+                    reply = "تم تحويل ${updated.size} جهة اتصال لأسماء English مع حفظ الاسم العربي في Nickname وإضافة تاجز البحث!",
+                    actionBadge = "ثنائي اللغة + Tags AI",
+                    matchedContacts = updated.take(10),
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _aiUiState.value = AiAssistantUiState.Error(e.localizedMessage ?: "فشل التحديث ثنائي اللغة")
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
     private suspend fun findMatchesInRoom(query: String): List<ContactRecord> = withContext(Dispatchers.IO) {
-        val tokens = query.trim().lowercase().split(" ").filter { it.isNotBlank() }
+        val tokens = ContactEntity.normalizeForSearch(query.trim()).split(" ").filter { it.isNotBlank() }
         if (tokens.isEmpty()) return@withContext emptyList()
-        val primaryMatches = contactDao.searchContacts(tokens.first(), limit = 40, offset = 0).map { it.toDomain() }
+        val primaryMatches = contactDao.searchContacts(tokens.first(), limit = 60, offset = 0).map { it.toDomain() }
         if (tokens.size == 1) return@withContext primaryMatches.take(15)
         val filtered = primaryMatches.filter { c ->
-            val hay = buildString {
-                append(c.displayName).append(' ')
-                append(c.primaryPhone).append(' ')
-                append(c.categoryPaths.joinToString(" ")).append(' ')
-                append(c.district.orEmpty()).append(' ')
-                append(c.address.orEmpty()).append(' ')
-                append(c.notes.orEmpty())
-            }.lowercase()
+            val hay = ContactEntity.normalizeForSearch(
+                buildString {
+                    append(c.displayName).append(' ')
+                    append(c.nickname.orEmpty()).append(' ')
+                    append(c.primaryPhone).append(' ')
+                    append(c.tags.joinToString(" ")).append(' ')
+                    append(c.categoryPaths.joinToString(" ")).append(' ')
+                    append(c.district.orEmpty()).append(' ')
+                    append(c.address.orEmpty()).append(' ')
+                    append(c.notes.orEmpty())
+                }
+            )
             tokens.all { hay.contains(it) }
         }
         filtered.ifEmpty { primaryMatches }.take(15)

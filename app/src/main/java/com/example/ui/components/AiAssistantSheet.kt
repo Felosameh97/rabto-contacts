@@ -64,6 +64,7 @@ fun AiAssistantSheet(
     uiState: AiAssistantUiState,
     onRunCommand: (String) -> Unit,
     onRunBatchCategorize: () -> Unit,
+    onRunBilingualEnrich: () -> Unit = {},
     onOpenContact: (ContactRecord) -> Unit,
     onWhatsAppWithMsg: (ContactRecord, String, String?) -> Unit,
     onDismiss: () -> Unit,
@@ -177,6 +178,16 @@ fun AiAssistantSheet(
                 Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("تصنيف ذكي تلقائي لـ 40 جهة غير مصنفة عبر Gemini")
+            }
+
+            FilledTonalButton(
+                onClick = onRunBilingualEnrich,
+                enabled = uiState !is AiAssistantUiState.Loading,
+                modifier = Modifier.fillMaxWidth().testTag("ai_bilingual_enrich_btn"),
+            ) {
+                Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("تحويل لـ English + حفظ Nickname عربي + Tags عبر Gemini")
             }
 
             when (uiState) {

@@ -245,4 +245,133 @@ object SmartCategoryEngine {
     private fun containsAny(text: String, vararg needles: String): Boolean {
         return needles.any { text.contains(it) }
     }
+
+    /**
+     * Generates rich bilingual searchable tags describing everything known about a contact
+     * (study/university, batch, department, profession, district, mobile network, custom tags).
+     */
+    fun generateTags(
+        displayName: String,
+        nickname: String?,
+        phones: List<String>,
+        emails: List<String>,
+        categoryPaths: List<String>,
+        organization: String?,
+        jobTitle: String?,
+        notes: String?,
+        address: String?,
+        district: String?,
+        existingTags: List<String> = emptyList(),
+    ): List<String> {
+        val tags = LinkedHashSet<String>()
+        existingTags.map { it.trim() }.filter { it.isNotBlank() }.forEach { tags += it }
+
+        val blob = listOfNotNull(
+            displayName,
+            nickname,
+            organization,
+            jobTitle,
+            notes,
+            address,
+            district,
+            emails.joinToString(" "),
+            categoryPaths.joinToString(" "),
+        ).joinToString(" ").lowercase(Locale.ROOT)
+        val normBlob = BilingualNameEngine.normalizeArabic(blob)
+
+        // Category-derived concise tags
+        for (path in categoryPaths) {
+            val leaf = path.substringAfterLast(">").trim()
+            if (leaf.isNotBlank() && !leaf.startsWith("فودافون") && !leaf.startsWith("بدون") && leaf.length <= 32) {
+                tags += leaf
+            }
+        }
+
+        // Bilingual profession & domain tags
+        if (emails.any { it.contains("eaeat", true) } || normBlob.contains("eaeat") || normBlob.contains("الاكاديميه")) {
+            tags += "EAEAT"
+            tags += "الأكاديمية"
+            tags += "جامعة"
+            Regex("202[1-6]").find(normBlob)?.value?.let { yr ->
+                tags += yr
+                tags += "دفعة $yr"
+            }
+        }
+        if (containsAny(normBlob, "دكتور", "dr.", "dr ", "doctor")) {
+            tags += "دكتور"
+            tags += "Doctor"
+        }
+        if (containsAny(normBlob, "مهندس", "eng.", "eng ", "engineer", "هندسه")) {
+            tags += "مهندس"
+            tags += "Engineer"
+        }
+        if (containsAny(normBlob, "كهرباء", "كهربائي", "electric")) {
+            tags += "كهربائي"
+            tags += "Electrician"
+        }
+        if (containsAny(normBlob, "ميكاترون", "mechatron", "ميكانيك", "mechanic")) {
+            tags += "ميكانيكا"
+            tags += "Mechanic"
+        }
+        if (containsAny(normBlob, "اتصالات", "telecom", "communication")) {
+            tags += "اتصالات"
+        }
+        if (containsAny(normBlob, "سباك", "plumb")) {
+            tags += "سباك"
+            tags += "Plumber"
+        }
+        if (containsAny(normBlob, "شرطه", "ضابط", "ظابط", "مباحث", "police", "officer")) {
+            tags += "شرطة"
+            tags += "Police"
+        }
+        if (containsAny(normBlob, "محام", "lawyer", "counselor")) {
+            tags += "محامي"
+            tags += "Lawyer"
+        }
+        if (containsAny(normBlob, "صيدلي", "pharmacy", "عياده", "مستشفي", "اسنان")) {
+            tags += "طبي"
+            tags += "Medical"
+        }
+        if (containsAny(normBlob, "توصيل", "دليفري", "مندوب", "شحن", "delivery")) {
+            tags += "توصيل"
+            tags += "Delivery"
+        }
+        if (containsAny(normBlob, "سمسار", "عقار", "اسكان", "مقاول", "broker")) {
+            tags += "عقارات"
+            tags += "RealEstate"
+        }
+        if (containsAny(normBlob, "عائله", "عيله", "ابي", "بابا", "امي", "ماما", "اخويا", "اختي", "family")) {
+            tags += "العائلة"
+            tags += "Family"
+        }
+        if (containsAny(normBlob, "اصدقاء", "friends")) {
+            tags += "أصدقاء"
+            tags += "Friends"
+        }
+
+        // District tag
+        val geo = district?.let { EgyptGeoLookup.findExactOrAlias(it) }
+            ?: EgyptGeoLookup.inferLocation(address, notes, displayName, organization)
+        if (geo != null) {
+            tags += geo.key
+            val enDist = geo.aliases.lastOrNull { it.all { ch -> ch.code < 128 } }
+            if (!enDist.isNullOrBlank()) {
+                tags += enDist.replaceFirstChar { it.uppercaseChar() }
+            }
+        }
+
+        // Carrier / Country tag
+        val primary = phones.firstOrNull().orEmpty()
+        val local = PhoneUtils.toLocalEgyptianPhone(primary)
+        when {
+            local.startsWith("010") -> tags += "Vodafone"
+            local.startsWith("011") -> tags += "Etisalat"
+            local.startsWith("012") -> tags += "Orange"
+            local.startsWith("015") -> tags += "WE"
+            primary.startsWith("+966") -> tags += "KSA"
+            primary.startsWith("+971") -> tags += "UAE"
+        }
+
+        return tags.filter { it.isNotBlank() }.take(18)
+    }
 }

@@ -92,11 +92,13 @@ test("Owner can CRUD contacts and toggle selective sync or favorite", async () =
 
   await assertSucceeds(
     contactRef.set({
-      displayName: "د. سارة علي",
+      displayName: "Dr. Sara Ali",
+      nickname: "د. سارة علي",
       primaryPhone: "+201234567890",
       phones: ["+201234567890"],
       emails: [],
       categoryPaths: ["الأصدقاء المقربين", "المطرية"],
+      tags: ["دكتور", "Doctor", "المطرية", "Orange"],
       district: "المطرية",
       latitude: 30.1213,
       longitude: 31.314,

@@ -514,6 +514,10 @@ private fun AuthenticatedMainScreen(
                                 onCheckGithubUpdates = viewModel::saveGithubRepoAndCheckUpdates,
                                 onPermissionsChanged = viewModel::refreshPermissionsState,
                                 onSignOut = onSignOut,
+                                onRunAiBilingualEnrich = {
+                                    showAiSheet = true
+                                    viewModel.runAiBilingualEnrichBatch()
+                                },
                             )
                         }
                     }
@@ -537,6 +541,11 @@ private fun AuthenticatedMainScreen(
             onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
             onToggleDeviceSync = viewModel::toggleDeviceContactSync,
             onAddPaymentTemplate = viewModel::savePaymentTemplate,
+            onSearchByTag = { tag ->
+                viewModel.closeContact()
+                viewModel.updateSearchQuery(tag)
+                navController.navigate(RouteHome) { launchSingleTop = true }
+            },
         )
     }
 
@@ -577,6 +586,7 @@ private fun AuthenticatedMainScreen(
                 )
             },
             onRunBatchCategorize = viewModel::runAiAutoCategorizeBatch,
+            onRunBilingualEnrich = viewModel::runAiBilingualEnrichBatch,
             onOpenContact = {
                 showAiSheet = false
                 viewModel.openContact(it)

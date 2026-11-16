@@ -171,6 +171,108 @@ class RabtaAiAssistant {
         }
     }
 
+    private val bilingualTagSchema = Schema.obj(
+        properties = mapOf(
+            "items" to Schema.array(
+                items = Schema.obj(
+                    properties = mapOf(
+                        "id" to Schema.string(description = "Exact contact id provided"),
+                        "englishName" to Schema.string(description = "Full detailed name in natural English"),
+                        "arabicNickname" to Schema.string(description = "Full Arabic name and any short/alternate name preserved"),
+                        "tags" to Schema.array(
+                            items = Schema.string(),
+                            description = "3 to 7 short bilingual searchable tags (profession, university, batch, district, role)",
+                        ),
+                    )
+                ),
+                description = "Enriched bilingual contact records",
+            )
+        )
+    )
+
+    private val enrichModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = bilingualTagSchema
+                temperature = 0.2f
+            },
+        )
+    }
+
+    data class BilingualTagEnrichment(
+        val englishName: String,
+        val arabicNickname: String,
+        val tags: List<String>,
+    )
+
+    suspend fun enrichContactsBilingualAndTags(
+        contacts: List<ContactRecord>,
+    ): Result<Map<String, BilingualTagEnrichment>> {
+        if (contacts.isEmpty()) return Result.success(emptyMap())
+        val batch = contacts.take(35)
+        return try {
+            val prompt = buildString {
+                appendLine("حول جهات الاتصال التالية إلى نظام ثنائي اللغة للبحث السريع:")
+                appendLine("1) englishName: الاسم الكامل المفصل بالإنجليزية (مثلاً 'Dr. Ahmed Mohamed Ali' أو 'Eng. Kareem Hassan').")
+                appendLine("2) arabicNickname: الاسم بالعربية مع الحفاظ على أي لقب أو اختصار قديم (مثلاً 'د. أحمد محمد علي').")
+                appendLine("3) tags: من 3 إلى 7 تاجز مختصرة بالعربية والإنجليزية تصف مجال الشخص، دفعته، جامعته، مهنته، منطقته، أو أي معلومة عنه.")
+                appendLine()
+                for (c in batch) {
+                    val info = listOfNotNull(
+                        "id=${c.id}",
+                        "name=${c.displayName}",
+                        c.nickname?.let { "nick=$it" },
+                        c.organization?.let { "org=$it" },
+                        c.jobTitle?.let { "title=$it" },
+                        c.categoryPaths.take(2).takeIf { it.isNotEmpty() }?.let { "cat=${it.joinToString(",")}" },
+                        c.district?.let { "dist=$it" },
+                        c.notes?.take(80)?.let { "notes=$it" },
+                    ).joinToString(" | ")
+                    appendLine(info)
+                }
+            }
+
+            val response = withTimeout(60_000L) {
+                enrichModel.generateContent(prompt)
+            }
+            val jsonString = response.text
+                ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً أثناء التحديث ثنائي اللغة"))
+
+            val json = JSONObject(jsonString)
+            val arr = json.optJSONArray("items") ?: return Result.success(emptyMap())
+            val out = LinkedHashMap<String, BilingualTagEnrichment>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id").trim()
+                val en = obj.optString("englishName").trim()
+                val ar = obj.optString("arabicNickname").trim()
+                val tagArr = obj.optJSONArray("tags")
+                val tagList = buildList {
+                    if (tagArr != null) {
+                        for (j in 0 until tagArr.length()) {
+                            val t = tagArr.optString(j).trim()
+                            if (t.isNotBlank()) add(t)
+                        }
+                    }
+                }
+                if (id.isNotBlank() && en.isNotBlank()) {
+                    out[id] = BilingualTagEnrichment(en, ar, tagList)
+                }
+            }
+            Result.success(out)
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Gemini bilingual enrichment timed out", e)
+            Result.failure(IllegalStateException("انتهت مهلة التحديث الذكي. حاول مرة أخرى."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini bilingual enrichment failed", e)
+            Result.failure(e)
+        }
+    }
+
     suspend fun classifyContactBatch(contacts: List<ContactRecord>): Result<Map<String, String>> {
         if (contacts.isEmpty()) return Result.success(emptyMap())
         val batch = contacts.take(40)

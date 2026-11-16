@@ -48,10 +48,12 @@ service cloud.firestore {
 
     function isValidContact(data) {
       return data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 200 &&
+             (!('nickname' in data) || (data.nickname is string && data.nickname.size() <= 250)) &&
              data.primaryPhone is string && data.primaryPhone.size() <= 60 &&
              isValidStringList(data.phones, 10) &&
              isValidStringList(data.emails, 5) &&
              isValidStringList(data.categoryPaths, 15) &&
+             (!('tags' in data) || isValidStringList(data.tags, 20)) &&
              (!('organization' in data) || (data.organization is string && data.organization.size() <= 200)) &&
              (!('jobTitle' in data) || (data.jobTitle is string && data.jobTitle.size() <= 160)) &&
              (!('notes' in data) || (data.notes is string && data.notes.size() <= 4000)) &&
@@ -121,7 +123,7 @@ service cloud.firestore {
         allow create: if isOwner(userId) &&
                          isValidId(contactId) &&
                          incoming().keys().hasAll(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['displayName', 'nickname', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'tags', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
                          isValidContact(incoming());
 
         allow update: if isOwner(userId) &&
@@ -129,7 +131,7 @@ service cloud.firestore {
                          isValidContact(incoming()) &&
                          incoming().createdAt == existing().createdAt &&
                          (
-                           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'tags', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'updatedAt']) ||
                            incoming().diff(existing()).affectedKeys().hasOnly(['syncedToDevice', 'updatedAt']) ||
                            incoming().diff(existing()).affectedKeys().hasOnly(['isFavorite', 'updatedAt'])
                          );

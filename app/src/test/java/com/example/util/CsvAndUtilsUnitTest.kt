@@ -45,10 +45,12 @@ class CsvAndUtilsUnitTest {
         val parsed = CsvParser.parseStream(ByteArrayInputStream(sampleCsv.toByteArray()))
         assertEquals(1, parsed.contacts.size)
         val c = parsed.contacts.first()
-        assertEquals("أحمد علي", c.displayName)
+        assertEquals("Ahmed Ali", c.displayName)
+        assertTrue(c.nickname?.contains("أحمد علي") == true)
         assertEquals(2, c.phones.size)
         assertEquals("+201023694045", c.primaryPhone)
         assertTrue(c.categoryPaths.contains("الجامعة > هندسة"))
+        assertTrue(c.tags.contains("هندسة"))
         assertEquals("المطرية", c.district)
         assertTrue(c.latitude != null && c.longitude != null)
     }
@@ -110,5 +112,64 @@ class CsvAndUtilsUnitTest {
         assertEquals("الشرقية (أرضي 055)", EgyptGeoLookup.inferLocationFromPhone("0552345678")?.key)
         assertEquals("السعودية (+966)", EgyptGeoLookup.inferLocationFromPhone("+966501234567")?.key)
     }
+
+    @Test
+    fun bilingualNameEngine_picksDetailedEnglishAndPreservesArabicAndShortVariants() {
+        val (display, nickname) = BilingualNameEngine.resolveEnglishAndNickname(
+            listOf("Ahmed", "أحمد محمد علي المطرية", "Dr. Ahmed Mohamed Ali")
+        )
+        assertEquals("Dr. Ahmed Mohamed Ali", display)
+        assertTrue(nickname != null)
+        assertTrue(nickname!!.contains("أحمد محمد علي المطرية"))
+        assertTrue(nickname.contains("Ahmed"))
+
+        val (arConverted, arNick) = BilingualNameEngine.resolveEnglishAndNickname(
+            listOf("أحمد حسن")
+        )
+        assertEquals("Ahmed Hassan", arConverted)
+        assertEquals("أحمد حسن", arNick)
+    }
+
+    @Test
+    fun contactDeduplicator_mergesDuplicatesPreservingShortAndLongNamesAndTags() {
+        val shortContact = com.example.domain.model.ContactRecord(
+            id = "c_short",
+            displayName = "أحمد",
+            primaryPhone = "01012345678",
+            phones = listOf("01012345678"),
+            notes = "دفعة 2023",
+            categoryPaths = listOf("2023"),
+        )
+        val detailedContact = com.example.domain.model.ContactRecord(
+            id = "c_long",
+            displayName = "Dr. Ahmed Ali El-Sayed",
+            primaryPhone = "+201012345678",
+            phones = listOf("+201012345678", "01122334455"),
+            emails = listOf("ahmed@eaeat.edu.eg"),
+            notes = "عيادة المطرية",
+            address = "المطرية القاهرة",
+            syncedToDevice = true,
+        )
+
+        val res = ContactDeduplicator.deduplicateAndMerge(listOf(shortContact, detailedContact))
+        assertEquals(1, res.mergedContacts.size)
+        assertEquals(1, res.supersededIds.size)
+        assertEquals("c_short", res.supersededIds.first())
+        assertEquals(1, res.duplicateGroupsMerged)
+
+        val merged = res.mergedContacts.first()
+        assertEquals("c_long", merged.id)
+        assertEquals("Dr. Ahmed Ali El-Sayed", merged.displayName)
+        assertTrue(merged.nickname?.contains("أحمد") == true)
+        assertEquals(2, merged.phones.size)
+        assertTrue(merged.notes?.contains("دفعة 2023") == true)
+        assertTrue(merged.notes?.contains("عيادة المطرية") == true)
+        assertTrue(merged.tags.contains("دكتور"))
+        assertTrue(merged.tags.contains("Doctor"))
+        assertTrue(merged.tags.contains("EAEAT"))
+        assertTrue(merged.tags.contains("2023"))
+        assertTrue(merged.tags.contains("Vodafone"))
+    }
 }
+
 

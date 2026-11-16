@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.provider.ContactsContract
 import androidx.core.content.ContextCompat
 import com.example.domain.model.ContactRecord
+import com.example.util.ContactDeduplicator
 import com.example.util.EgyptGeoLookup
 import com.example.util.PhoneUtils
 import com.example.util.SmartCategoryEngine
@@ -80,6 +81,7 @@ class DeviceContactsManager(private val context: Context) {
             val addressByCid = hashMapOf<Long, String>()
             val orgByCid = hashMapOf<Long, Pair<String?, String?>>()
             val notesByCid = hashMapOf<Long, String>()
+            val nickByCid = hashMapOf<Long, String>()
             val labelsByCid = hashMapOf<Long, LinkedHashSet<String>>()
 
             context.contentResolver.query(
@@ -123,6 +125,9 @@ class DeviceContactsManager(private val context: Context) {
                         ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE -> {
                             notesByCid.putIfAbsent(cid, d1.take(1000))
                         }
+                        ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE -> {
+                            nickByCid.putIfAbsent(cid, d1.take(200))
+                        }
                         ContactsContract.CommonDataKinds.GroupMembership.CONTENT_ITEM_TYPE -> {
                             val gid = d1.toLongOrNull()
                             val gTitle = gid?.let { groupTitleById[it] }
@@ -150,19 +155,26 @@ class DeviceContactsManager(private val context: Context) {
                 val orgPair = orgByCid[cid]
                 val address = addressByCid[cid]
                 val notes = notesByCid[cid]
+                val nick = nickByCid[cid]
                 val rawLabels = labelsByCid[cid]?.toList().orEmpty() + listOf("الهاتف (مستورد)")
 
-                val (nestedCats, starred) = SmartCategoryEngine.normalizeAndNestLabels(
-                    rawLabels = rawLabels,
-                    displayName = displayName,
-                    phones = phones,
-                    emails = emails,
+                val rawRecord = ContactRecord(
+                    id = "dev_${cid}_${UUID.nameUUIDFromBytes(displayName.toByteArray()).toString().take(6)}",
+                    displayName = displayName.take(200),
+                    nickname = nick,
+                    primaryPhone = phones.firstOrNull().orEmpty(),
+                    phones = phones.take(10),
+                    emails = emails.take(5),
+                    categoryPaths = rawLabels,
                     organization = orgPair?.first,
                     jobTitle = orgPair?.second,
                     notes = notes,
                     address = address,
+                    syncedToDevice = true,
+                    isFavorite = starredSet.contains(cid),
                 )
-                nestedCats.forEach { cat ->
+                val enriched = ContactDeduplicator.enrichSingleContact(rawRecord)
+                enriched.categoryPaths.forEach { cat ->
                     val parts = cat.split(">").map { it.trim() }.filter { it.isNotBlank() }
                     var cur = ""
                     parts.forEach { part ->
@@ -170,27 +182,7 @@ class DeviceContactsManager(private val context: Context) {
                         discoveredCats += cur
                     }
                 }
-
-                val geo = EgyptGeoLookup.inferLocation(address, displayName, notes, rawLabels.joinToString(" "))
-                    ?: phones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
-
-                records += ContactRecord(
-                    id = "dev_${cid}_${UUID.nameUUIDFromBytes(displayName.toByteArray()).toString().take(6)}",
-                    displayName = displayName.take(200),
-                    primaryPhone = phones.firstOrNull().orEmpty(),
-                    phones = phones.take(10),
-                    emails = emails.take(5),
-                    categoryPaths = nestedCats,
-                    organization = orgPair?.first,
-                    jobTitle = orgPair?.second,
-                    notes = notes,
-                    address = address,
-                    district = geo?.key,
-                    latitude = geo?.lat,
-                    longitude = geo?.lng,
-                    syncedToDevice = true,
-                    isFavorite = starred || starredSet.contains(cid),
-                )
+                records += enriched
             }
 
             records to discoveredCats
@@ -238,6 +230,31 @@ class DeviceContactsManager(private val context: Context) {
                         .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE)
                         .withValue(ContactsContract.CommonDataKinds.Email.DATA, email)
                         .withValue(ContactsContract.CommonDataKinds.Email.TYPE, ContactsContract.CommonDataKinds.Email.TYPE_WORK)
+                        .build()
+                )
+            }
+            contact.nickname?.takeIf { it.isNotBlank() }?.let { nick ->
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Nickname.CONTENT_ITEM_TYPE)
+                        .withValue(ContactsContract.CommonDataKinds.Nickname.NAME, nick)
+                        .withValue(ContactsContract.CommonDataKinds.Nickname.TYPE, ContactsContract.CommonDataKinds.Nickname.TYPE_DEFAULT)
+                        .build()
+                )
+            }
+            val noteWithTags = buildString {
+                contact.notes?.takeIf { it.isNotBlank() }?.let { append(it).append('\n') }
+                if (contact.tags.isNotEmpty()) {
+                    append("Tags: ").append(contact.tags.joinToString(" #", prefix = "#"))
+                }
+            }.trim()
+            if (noteWithTags.isNotBlank()) {
+                ops.add(
+                    ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                        .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                        .withValue(ContactsContract.Data.MIMETYPE, ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE)
+                        .withValue(ContactsContract.CommonDataKinds.Note.NOTE, noteWithTags)
                         .build()
                 )
             }

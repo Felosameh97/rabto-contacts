@@ -83,6 +83,9 @@ interface ContactDao {
     @Query("SELECT * FROM contacts WHERE categoryPathsFlat LIKE '%جهات اتصال تلقائية%' OR categoryPathsFlat = '' LIMIT :limit")
     suspend fun getAutoOrUnclassifiedContacts(limit: Int = 120): List<ContactEntity>
 
+    @Query("SELECT * FROM contacts WHERE nickname IS NULL OR nickname = '' OR tagsJoined = '' LIMIT :limit")
+    suspend fun getContactsNeedingBilingualOrTags(limit: Int = 50): List<ContactEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<ContactEntity>)
 
@@ -95,6 +98,9 @@ interface ContactDao {
     @Query("DELETE FROM contact_categories WHERE contactId = :contactId")
     suspend fun deleteCategoryRefsForContact(contactId: String)
 
+    @Query("DELETE FROM contact_categories WHERE contactId IN (:contactIds)")
+    suspend fun deleteCategoryRefsForContacts(contactIds: List<String>)
+
     @Query("DELETE FROM contact_categories")
     suspend fun clearCategoryRefs()
 
@@ -104,11 +110,17 @@ interface ContactDao {
     @Query("DELETE FROM phone_lookup WHERE contactId = :contactId")
     suspend fun deletePhoneKeysForContact(contactId: String)
 
+    @Query("DELETE FROM phone_lookup WHERE contactId IN (:contactIds)")
+    suspend fun deletePhoneKeysForContacts(contactIds: List<String>)
+
     @Query("DELETE FROM phone_lookup")
     suspend fun clearPhoneKeys()
 
     @Query("DELETE FROM contacts WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM contacts WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>)
 
     @Query("UPDATE contacts SET syncedToDevice = :synced WHERE id = :id")
     suspend fun updateSyncedFlag(id: String, synced: Boolean)
@@ -125,6 +137,12 @@ interface ContactDao {
         catEntities: List<CategoryEntity>,
         categoryDao: CategoryDao,
     ) {
+        val ids = contacts.map { it.id }
+        ids.chunked(500).forEach { chunk ->
+            deleteCategoryRefsForContacts(chunk)
+            deletePhoneKeysForContacts(chunk)
+        }
+
         val catRefs = ArrayList<ContactCategoryCrossRef>(contacts.size * 2)
         val phoneRefs = ArrayList<PhoneLookupEntity>(contacts.size)
 
@@ -187,6 +205,16 @@ interface ContactDao {
         deleteCategoryRefsForContact(contactId)
         deletePhoneKeysForContact(contactId)
         deleteById(contactId)
+    }
+
+    @Transaction
+    suspend fun deleteContactsWithIndexes(contactIds: List<String>) {
+        if (contactIds.isEmpty()) return
+        contactIds.chunked(500).forEach { chunk ->
+            deleteCategoryRefsForContacts(chunk)
+            deletePhoneKeysForContacts(chunk)
+            deleteByIds(chunk)
+        }
     }
 }
 
