@@ -196,6 +196,43 @@ class CsvAndUtilsUnitTest {
         assertEquals("/data/user/0/app/files/contact_photos/a.jpg", mergedRes.mergedContacts.first().photoUri)
         assertTrue(com.example.ai.RabtaAiAssistant.parseIsoDateToEpochMs("2026-11-20T14:30") != null)
     }
+
+    @Test
+    fun localTranscriptAnalyzer_extractsHighlightsCalendarAndLocalCommands() {
+        val sampleTranscript = "أهلاً يا أحمد، متنساش بكرة عندنا اجتماع تسليم الشغل الساعة 5 مساءً. الحساب المطلوب 1500 جنيه فودافون كاش."
+        val analysis = com.example.ai.LocalTranscriptAnalyzer.analyze(
+            rawTranscript = sampleTranscript,
+            contactName = "Ahmed Ali",
+            phone = "+201012345678",
+            referenceTimeMs = 1763294400000L, // Fixed reference epoch
+        )
+        assertTrue(analysis.highlights.isNotEmpty())
+        assertTrue(analysis.extractedNotes.contains("1500"))
+        assertTrue(analysis.eventTitle.isNotBlank())
+        assertTrue(analysis.eventEpochMs != null && analysis.eventEpochMs!! > 1763294400000L)
+        assertTrue(analysis.eventDateIso.endsWith("17:00"))
+
+        val callCmd = com.example.ai.LocalTranscriptAnalyzer.tryParseCommandLocally(
+            userText = "اتصل بأحمد علي",
+            availableTopCategories = listOf("الجامعة", "العمل"),
+        )
+        assertEquals(com.example.ai.AiCommandAction.CALL, callCmd?.action)
+        assertEquals("أحمد علي", callCmd?.queryNameOrPhone)
+
+        val payCmd = com.example.ai.LocalTranscriptAnalyzer.tryParseCommandLocally(
+            userText = "حول 250 جنيه انستاباي لمحمد",
+            availableTopCategories = emptyList(),
+        )
+        assertEquals(com.example.ai.AiCommandAction.PAYMENT, payCmd?.action)
+        assertEquals("250", payCmd?.amount)
+
+        val catCmd = com.example.ai.LocalTranscriptAnalyzer.tryParseCommandLocally(
+            userText = "افتح قسم الجامعة",
+            availableTopCategories = listOf("الجامعة"),
+        )
+        assertEquals(com.example.ai.AiCommandAction.OPEN_CATEGORY, catCmd?.action)
+        assertEquals("الجامعة", catCmd?.categoryPath)
+    }
 }
 
 

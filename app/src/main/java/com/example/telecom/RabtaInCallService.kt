@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.telecom.Call
@@ -16,6 +17,7 @@ import android.telecom.TelecomManager
 import android.telecom.VideoProfile
 import androidx.core.app.NotificationCompat
 import com.example.R
+import com.example.ai.LocalTranscriptAnalyzer
 import com.example.data.local.CallTranscriptEntity
 import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
@@ -45,6 +47,8 @@ data class ActiveCallUiState(
     val isSpeaker: Boolean = false,
     val isOnHold: Boolean = false,
     val isRecording: Boolean = false,
+    val isLiveTranscribing: Boolean = false,
+    val liveTranscriptText: String = "",
     val recordingStatusNote: String? = null,
 )
 
@@ -52,10 +56,13 @@ class RabtaInCallService : InCallService() {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var timerJob: Job? = null
+    private var liveJob: Job? = null
     private var activeCall: Call? = null
     private var callStartTimeMs: Long = 0L
     private var callLoggedForCurrentCall: Boolean = false
     private var lastSavedRecordingFile: File? = null
+    private var speechTranscriber: LocalSpeechTranscriber? = null
+    private var collectedLiveText: String = ""
 
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
@@ -67,10 +74,24 @@ class RabtaInCallService : InCallService() {
         super.onCreate()
         instance = this
         ensureCallNotificationChannel()
+        speechTranscriber = LocalSpeechTranscriber(applicationContext)
+        liveJob = serviceScope.launch {
+            speechTranscriber?.state?.collect { st ->
+                val txt = st.fullText
+                if (txt.isNotBlank()) collectedLiveText = txt
+                _uiState.value = _uiState.value.copy(
+                    isLiveTranscribing = st.isListening,
+                    liveTranscriptText = txt,
+                    recordingStatusNote = st.errorNote ?: _uiState.value.recordingStatusNote,
+                )
+            }
+        }
     }
 
     override fun onDestroy() {
+        stopLiveTranscriptionInternal()
         stopRecordingInternal()
+        liveJob?.cancel()
         timerJob?.cancel()
         serviceScope.cancel()
         if (instance === this) instance = null
@@ -88,6 +109,8 @@ class RabtaInCallService : InCallService() {
         callStartTimeMs = 0L
         callLoggedForCurrentCall = false
         lastSavedRecordingFile = null
+        collectedLiveText = ""
+        speechTranscriber?.clear()
 
         _uiState.value = ActiveCallUiState(
             hasActiveCall = true,
@@ -95,7 +118,6 @@ class RabtaInCallService : InCallService() {
             phoneNumber = normalized,
         )
 
-        // Instant indexed lookup in our 20k+ Room database
         serviceScope.launch(Dispatchers.IO) {
             val key = PhoneUtils.phoneSearchKey(normalized)
             val matched = if (key.length >= 4) {
@@ -118,6 +140,7 @@ class RabtaInCallService : InCallService() {
         call.unregisterCallback(callCallback)
         if (activeCall === call) {
             timerJob?.cancel()
+            stopLiveTranscriptionInternal()
             stopRecordingInternal()
             persistCompletedCallIfNeeded()
             activeCall = null
@@ -147,14 +170,15 @@ class RabtaInCallService : InCallService() {
                 callStartTimeMs = System.currentTimeMillis()
                 startDurationTimer()
                 serviceScope.launch {
-                    val autoRecord = SyncPrefsDataStore(applicationContext).autoRecordCallsFlow.firstOrNull() ?: false
-                    if (autoRecord && !_uiState.value.isRecording) {
+                    val autoRecord = SyncPrefsDataStore(applicationContext).autoRecordCallsFlow.firstOrNull() ?: true
+                    if (autoRecord && !_uiState.value.isRecording && !_uiState.value.isLiveTranscribing) {
                         startRecordingInternal()
                     }
                 }
             }
         } else if (state == Call.STATE_DISCONNECTED) {
             timerJob?.cancel()
+            stopLiveTranscriptionInternal()
             stopRecordingInternal()
             persistCompletedCallIfNeeded()
         }
@@ -171,7 +195,23 @@ class RabtaInCallService : InCallService() {
         }
     }
 
+    private fun promoteForegroundMicrophoneIfPermitted() {
+        if (!CallRecorderManager.hasRecordPermission(applicationContext)) return
+        val notif = buildCallNotification(_uiState.value)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            } else {
+                startForeground(NOTIF_ID, notif)
+            }
+        }
+    }
+
     private fun startRecordingInternal() {
+        if (_uiState.value.isLiveTranscribing) {
+            stopLiveTranscriptionInternal()
+        }
+        promoteForegroundMicrophoneIfPermitted()
         val label = _uiState.value.matchedContact?.displayName
             ?.ifBlank { _uiState.value.phoneNumber }
             ?: _uiState.value.phoneNumber
@@ -179,7 +219,7 @@ class RabtaInCallService : InCallService() {
             .onSuccess {
                 _uiState.value = _uiState.value.copy(
                     isRecording = true,
-                    recordingStatusNote = "جاري التسجيل محلياً (.m4a)",
+                    recordingStatusNote = "جاري تسجيل المكالمة (.m4a)",
                 )
             }
             .onFailure { err ->
@@ -203,11 +243,36 @@ class RabtaInCallService : InCallService() {
         }
     }
 
+    private fun startLiveTranscriptionInternal() {
+        if (!CallRecorderManager.hasRecordPermission(applicationContext)) {
+            _uiState.value = _uiState.value.copy(
+                recordingStatusNote = "يرجى منح صلاحية الميكروفون للتفريغ المباشر",
+            )
+            return
+        }
+        if (_uiState.value.isRecording) {
+            stopRecordingInternal()
+        }
+        promoteForegroundMicrophoneIfPermitted()
+        speechTranscriber?.start("ar-EG")
+        _uiState.value = _uiState.value.copy(
+            isLiveTranscribing = true,
+            recordingStatusNote = "تفريغ مباشر فوري (بدون Gemini)",
+        )
+    }
+
+    private fun stopLiveTranscriptionInternal() {
+        val text = speechTranscriber?.stop().orEmpty()
+        if (text.isNotBlank()) collectedLiveText = text
+        _uiState.value = _uiState.value.copy(isLiveTranscribing = false)
+    }
+
     private fun persistCompletedCallIfNeeded() {
         if (callLoggedForCurrentCall) return
         val snapshot = _uiState.value
         val audioFile = lastSavedRecordingFile
-        if (snapshot.phoneNumber.isBlank() && audioFile == null) return
+        val liveText = collectedLiveText.ifBlank { snapshot.liveTranscriptText }.trim()
+        if (snapshot.phoneNumber.isBlank() && audioFile == null && liveText.isBlank()) return
         callLoggedForCurrentCall = true
 
         val duration = if (callStartTimeMs > 0L) {
@@ -220,16 +285,40 @@ class RabtaInCallService : InCallService() {
             ?.ifBlank { snapshot.phoneNumber }
             ?: snapshot.phoneNumber.ifBlank { "مكالمة" }
 
-        val entry = CallTranscriptEntity(
-            id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
-            contactId = contactId,
-            phone = snapshot.phoneNumber,
-            contactName = contactName,
-            audioFilePath = audioFile?.absolutePath.orEmpty(),
-            timestampMs = System.currentTimeMillis(),
-            durationSec = duration,
-            status = if (audioFile != null && audioFile.exists() && audioFile.length() > 512L) "PENDING" else "NO_AUDIO",
-        )
+        val entry = if (liveText.isNotBlank()) {
+            val localAnalysis = LocalTranscriptAnalyzer.analyze(
+                rawTranscript = liveText,
+                contactName = contactName,
+                phone = snapshot.phoneNumber,
+            )
+            CallTranscriptEntity(
+                id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
+                contactId = contactId,
+                phone = snapshot.phoneNumber,
+                contactName = contactName,
+                audioFilePath = audioFile?.absolutePath.orEmpty(),
+                transcript = localAnalysis.transcript,
+                highlightsJoined = localAnalysis.highlights.joinToString("\n"),
+                extractedNotes = localAnalysis.extractedNotes,
+                suggestedEventTitle = localAnalysis.eventTitle,
+                suggestedEventDateIso = localAnalysis.eventDateIso,
+                suggestedEventEpochMs = localAnalysis.eventEpochMs,
+                timestampMs = System.currentTimeMillis(),
+                durationSec = duration,
+                status = "READY",
+            )
+        } else {
+            CallTranscriptEntity(
+                id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
+                contactId = contactId,
+                phone = snapshot.phoneNumber,
+                contactName = contactName,
+                audioFilePath = audioFile?.absolutePath.orEmpty(),
+                timestampMs = System.currentTimeMillis(),
+                durationSec = duration,
+                status = if (audioFile != null && audioFile.exists() && audioFile.length() > 256L) "PENDING" else "NO_AUDIO",
+            )
+        }
         serviceScope.launch(Dispatchers.IO) {
             runCatching {
                 RabtaDatabase.getInstance(applicationContext).callTranscriptDao().upsert(entry)
@@ -258,8 +347,7 @@ class RabtaInCallService : InCallService() {
         }
     }
 
-    private fun postCallNotification(state: ActiveCallUiState) {
-        val nm = getSystemService(NotificationManager::class.java) ?: return
+    private fun buildCallNotification(state: ActiveCallUiState): Notification {
         val fullScreenIntent = Intent(this, InCallActivity::class.java)
         val pi = PendingIntent.getActivity(
             this,
@@ -274,7 +362,7 @@ class RabtaInCallService : InCallService() {
             Call.STATE_HOLDING -> "قيد الانتظار"
             else -> "جاري الاتصال..."
         }
-        val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title.ifBlank { "مكالمة Felo Contacts" })
             .setContentText(subtitle)
@@ -284,10 +372,22 @@ class RabtaInCallService : InCallService() {
             .setContentIntent(pi)
             .setFullScreenIntent(pi, true)
             .build()
-        runCatching { nm.notify(NOTIF_ID, notif) }
+    }
+
+    private fun postCallNotification(state: ActiveCallUiState) {
+        val nm = getSystemService(NotificationManager::class.java) ?: return
+        runCatching { nm.notify(NOTIF_ID, buildCallNotification(state)) }
     }
 
     private fun cancelCallNotification() {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } else {
+                @Suppress("DEPRECATION")
+                stopForeground(true)
+            }
+        }
         getSystemService(NotificationManager::class.java)?.cancel(NOTIF_ID)
     }
 
@@ -373,6 +473,15 @@ class RabtaInCallService : InCallService() {
                 svc.stopRecordingInternal()
             } else {
                 svc.startRecordingInternal()
+            }
+        }
+
+        fun toggleLiveTranscription() {
+            val svc = instance ?: return
+            if (_uiState.value.isLiveTranscribing) {
+                svc.stopLiveTranscriptionInternal()
+            } else {
+                svc.startLiveTranscriptionInternal()
             }
         }
     }

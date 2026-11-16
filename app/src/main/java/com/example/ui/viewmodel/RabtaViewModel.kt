@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.AiCommandAction
+import com.example.ai.LocalTranscriptAnalyzer
 import com.example.ai.RabtaAiAssistant
 import com.example.data.device.CallLogReader
 import com.example.data.device.DeviceContactsManager
@@ -33,6 +34,7 @@ import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
+import com.example.util.BilingualNameEngine
 import com.example.util.ContactDeduplicator
 import com.example.util.CsvParser
 import com.example.util.EgyptGeoLookup
@@ -107,10 +109,6 @@ class RabtaViewModel(
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    val geoContacts: StateFlow<List<ContactRecord>> = contactDao.observeGeoContacts()
-        .map { list -> list.map { it.toDomain() } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
     val syncedDeviceContacts: StateFlow<List<ContactRecord>> = contactDao.observeSyncedContacts()
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -153,7 +151,7 @@ class RabtaViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), CalmPalette.SLATE)
 
     val autoRecordCalls: StateFlow<Boolean> = prefs.autoRecordCallsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     val showContactPhotos: StateFlow<Boolean> = prefs.showContactPhotosFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
@@ -165,7 +163,7 @@ class RabtaViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     val autoTranscribeCalls: StateFlow<Boolean> = prefs.autoTranscribeCallsFlow
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val simPreference: StateFlow<SimPreference> = prefs.simPreferenceFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SimPreference.ASK_OR_BOTH)
@@ -477,6 +475,52 @@ class RabtaViewModel(
             }
         } finally {
             processingTranscriptIds.remove(record.id)
+        }
+    }
+
+    fun saveLiveSpeechTranscript(
+        rawText: String,
+        contactNameInput: String = "",
+        phoneInput: String = "",
+    ) {
+        val clean = rawText.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch {
+            val cleanPhone = PhoneUtils.normalizePhone(phoneInput).ifBlank { phoneInput.trim() }
+            val matchedContact = withContext(Dispatchers.IO) {
+                val key = PhoneUtils.phoneSearchKey(cleanPhone)
+                if (key.length >= 6) contactDao.findByExactPhoneKey(key)?.toDomain() else null
+            }
+            val displayName = contactNameInput.trim().ifBlank {
+                matchedContact?.displayName ?: cleanPhone.ifBlank { "تفريغ صوتي مباشر" }
+            }
+            val analysis = LocalTranscriptAnalyzer.analyze(
+                rawTranscript = clean,
+                contactName = displayName,
+                phone = cleanPhone,
+            )
+            val record = CallTranscriptRecord(
+                id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
+                contactId = matchedContact?.id,
+                phone = cleanPhone.ifBlank { matchedContact?.primaryPhone.orEmpty() },
+                contactName = displayName,
+                transcript = analysis.transcript,
+                highlights = analysis.highlights,
+                extractedNotes = analysis.extractedNotes,
+                suggestedEventTitle = analysis.eventTitle,
+                suggestedEventDateIso = analysis.eventDateIso,
+                suggestedEventEpochMs = analysis.eventEpochMs,
+                timestampMs = System.currentTimeMillis(),
+                durationSec = 0L,
+                status = "READY",
+            )
+            withContext(Dispatchers.IO) {
+                transcriptDao.upsert(record.toEntity())
+            }
+            if (matchedContact != null && analysis.extractedNotes.isNotBlank()) {
+                saveTranscriptNotesToContact(record, silent = true)
+            }
+            _statusMessage.value = "تم حفظ التفريغ المباشر واستخراج الملاحظات والمواعيد (مجاناً بدون Gemini)"
         }
     }
 
@@ -1308,7 +1352,6 @@ class RabtaViewModel(
     fun runAiCommand(
         userPrompt: String,
         onNavigateToCategory: (String) -> Unit,
-        onNavigateToMap: () -> Unit,
     ) {
         val clean = userPrompt.trim()
         if (clean.isBlank()) return
@@ -1318,10 +1361,22 @@ class RabtaViewModel(
                 val topCats = withContext(Dispatchers.IO) {
                     categoryDao.getChildren("").map { it.name }
                 }
-                val planRes = aiAssistant.parseCommand(clean, topCats)
-                val plan = planRes.getOrElse { err ->
-                    _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "تعذر الاتصال بـ Gemini AI")
-                    return@launch
+                val localPlan = LocalTranscriptAnalyzer.tryParseCommandLocally(clean, topCats)
+                val plan = localPlan ?: run {
+                    val planRes = aiAssistant.parseCommand(clean, topCats)
+                    planRes.getOrElse { err ->
+                        val fallbackMatches = findMatchesInRoom(clean)
+                        if (fallbackMatches.isNotEmpty()) {
+                            _aiUiState.value = AiAssistantUiState.Success(
+                                reply = "نتائج البحث الفوري لـ '$clean' (محلياً بدون استهلاك رصيد Gemini):",
+                                actionBadge = "بحث فوري (${fallbackMatches.size})",
+                                matchedContacts = fallbackMatches,
+                            )
+                        } else {
+                            _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "تعذر الاتصال بـ Gemini AI")
+                        }
+                        return@launch
+                    }
                 }
 
                 when (plan.action) {
@@ -1374,10 +1429,9 @@ class RabtaViewModel(
                     AiCommandAction.MAP_DISTRICT -> {
                         val q = plan.district.ifBlank { plan.queryNameOrPhone }
                         val results = findMatchesInRoom(q)
-                        onNavigateToMap()
                         _aiUiState.value = AiAssistantUiState.Success(
-                            reply = plan.replyAr.ifBlank { "تم فتح الخريطة لمنطقة $q (${results.size} نتيجة)" },
-                            actionBadge = "الخريطة: $q",
+                            reply = "أرقام منطقة $q (${results.size} نتيجة) — افتح أي شخص للضغط على Google Maps:",
+                            actionBadge = "منطقة: $q",
                             matchedContacts = results,
                         )
                     }
@@ -1445,12 +1499,28 @@ class RabtaViewModel(
                     return@launch
                 }
                 val mapRes = aiAssistant.classifyContactBatch(candidates)
-                val assignments = mapRes.getOrElse { err ->
-                    _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "فشل التصنيف عبر Gemini")
-                    return@launch
+                var usedLocalFallback = false
+                val assignments = mapRes.getOrElse {
+                    usedLocalFallback = true
+                    candidates.associate { c ->
+                        val (nestedCats, _) = SmartCategoryEngine.normalizeAndNestLabels(
+                            rawLabels = c.categoryPaths,
+                            displayName = c.displayName,
+                            phones = c.phones,
+                            emails = c.emails,
+                            organization = c.organization,
+                            jobTitle = c.jobTitle,
+                            notes = c.notes,
+                            address = c.address,
+                        )
+                        val smartPath = nestedCats.firstOrNull { !it.startsWith("جهات اتصال تلقائية") }
+                            ?: nestedCats.firstOrNull()
+                            ?: "جهات اتصال تلقائية > تصنيف ذكي"
+                        c.id to smartPath
+                    }
                 }
                 if (assignments.isEmpty()) {
-                    _aiUiState.value = AiAssistantUiState.Error("لم يرجع Gemini تصنيفات لهذه الدفعة")
+                    _aiUiState.value = AiAssistantUiState.Error("لم أجد تصنيفات جديدة لهذه الدفعة")
                     return@launch
                 }
 
@@ -1474,8 +1544,12 @@ class RabtaViewModel(
                 }
                 loadCategoryLevel(_currentCategoryPath.value)
                 _aiUiState.value = AiAssistantUiState.Success(
-                    reply = "تم تصنيف ${updatedContacts.size} جهة اتصال بالذكاء الاصطناعي داخل ${catNodes.size} فئة متداخلة!",
-                    actionBadge = "تصنيف Gemini AI",
+                    reply = if (usedLocalFallback) {
+                        "تم تصنيف ${updatedContacts.size} جهة اتصال بالمحرك المحلي الذكي (تجاوز رصيد Gemini)!"
+                    } else {
+                        "تم تصنيف ${updatedContacts.size} جهة اتصال بالذكاء الاصطناعي داخل ${catNodes.size} فئة متداخلة!"
+                    },
+                    actionBadge = if (usedLocalFallback) "تصنيف محلي ذكي" else "تصنيف Gemini AI",
                     matchedContacts = updatedContacts.take(10),
                 )
             } catch (e: CancellationException) {
@@ -1506,25 +1580,50 @@ class RabtaViewModel(
                     return@launch
                 }
                 val enrichRes = aiAssistant.enrichContactsBilingualAndTags(candidates)
-                val map = enrichRes.getOrElse { err ->
-                    _aiUiState.value = AiAssistantUiState.Error(err.localizedMessage ?: "تعذر التحديث الذكي عبر Gemini")
-                    return@launch
-                }
+                var usedLocalFallback = false
                 val updated = ArrayList<ContactRecord>()
-                for (c in candidates) {
-                    val item = map[c.id] ?: continue
-                    val combinedNick = listOfNotNull(
-                        item.arabicNickname.takeIf { it.isNotBlank() },
-                        c.nickname?.takeIf { it.isNotBlank() && it != item.arabicNickname },
-                        c.displayName.takeIf { it.isNotBlank() && !it.equals(item.englishName, true) },
-                    ).distinct().joinToString(" • ").take(240).ifBlank { null }
+                val map = enrichRes.getOrNull()
+                if (map != null) {
+                    for (c in candidates) {
+                        val item = map[c.id] ?: continue
+                        val combinedNick = listOfNotNull(
+                            item.arabicNickname.takeIf { it.isNotBlank() },
+                            c.nickname?.takeIf { it.isNotBlank() && it != item.arabicNickname },
+                            c.displayName.takeIf { it.isNotBlank() && !it.equals(item.englishName, true) },
+                        ).distinct().joinToString(" • ").take(240).ifBlank { null }
 
-                    val mergedTags = (c.tags + item.tags).map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
-                    updated += c.copy(
-                        displayName = item.englishName.take(200),
-                        nickname = combinedNick,
-                        tags = mergedTags,
-                    )
+                        val mergedTags = (c.tags + item.tags).map { it.trim() }.filter { it.isNotBlank() }.distinct().take(20)
+                        updated += c.copy(
+                            displayName = item.englishName.take(200),
+                            nickname = combinedNick,
+                            tags = mergedTags,
+                        )
+                    }
+                } else {
+                    usedLocalFallback = true
+                    for (c in candidates) {
+                        val (enName, arNick) = BilingualNameEngine.resolveEnglishAndNickname(
+                            listOfNotNull(c.displayName, c.nickname)
+                        )
+                        val tags = SmartCategoryEngine.generateTags(
+                            displayName = enName.ifBlank { c.displayName },
+                            nickname = arNick,
+                            phones = c.phones,
+                            emails = c.emails,
+                            categoryPaths = c.categoryPaths,
+                            organization = c.organization,
+                            jobTitle = c.jobTitle,
+                            notes = c.notes,
+                            address = c.address,
+                            district = c.district,
+                            existingTags = c.tags,
+                        )
+                        updated += c.copy(
+                            displayName = enName.ifBlank { c.displayName },
+                            nickname = arNick,
+                            tags = tags,
+                        )
+                    }
                 }
                 if (updated.isNotEmpty()) {
                     withContext(Dispatchers.IO) {
@@ -1538,8 +1637,12 @@ class RabtaViewModel(
                     loadCategoryLevel(_currentCategoryPath.value)
                 }
                 _aiUiState.value = AiAssistantUiState.Success(
-                    reply = "تم تحويل ${updated.size} جهة اتصال لأسماء English مع حفظ الاسم العربي في Nickname وإضافة تاجز البحث!",
-                    actionBadge = "ثنائي اللغة + Tags AI",
+                    reply = if (usedLocalFallback) {
+                        "تم تحديث ${updated.size} جهة اتصال محلياً (English + Nickname عربي + Tags) بدون استهلاك رصيد Gemini!"
+                    } else {
+                        "تم تحويل ${updated.size} جهة اتصال لأسماء English مع حفظ الاسم العربي في Nickname وإضافة تاجز البحث!"
+                    },
+                    actionBadge = if (usedLocalFallback) "ثنائي اللغة + Tags محلي" else "ثنائي اللغة + Tags AI",
                     matchedContacts = updated.take(10),
                 )
             } catch (e: CancellationException) {

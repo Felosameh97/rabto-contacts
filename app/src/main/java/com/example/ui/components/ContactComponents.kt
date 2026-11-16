@@ -583,52 +583,60 @@ fun ContactDetailBottomSheet(
                 }
             }
 
-            // Emails, Telegram handle, Website, Address/Map
-            if (contact.emails.isNotEmpty() || !contact.telegramHandle.isNullOrBlank() || !contact.website.isNullOrBlank() || !contact.address.isNullOrBlank() || contact.latitude != null) {
-                HorizontalDivider()
-                Text("بيانات التواصل الأخرى", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-                contact.emails.forEach { email ->
-                    ActionInfoRow(
-                        icon = Icons.Rounded.Email,
-                        label = email,
-                        actionLabel = "مراسلة",
-                        onClick = { SystemIntents.sendEmail(context, email) },
-                    )
-                }
-                contact.telegramHandle?.takeIf { it.isNotBlank() }?.let { handle ->
-                    ActionInfoRow(
-                        icon = Icons.AutoMirrored.Rounded.Send,
-                        label = "Telegram: $handle",
-                        actionLabel = "فتح",
-                        onClick = { SystemIntents.openTelegram(context, handle) },
-                    )
-                }
-                contact.website?.takeIf { it.isNotBlank() }?.let { url ->
-                    ActionInfoRow(
-                        icon = Icons.Rounded.Language,
-                        label = url,
-                        actionLabel = "زيارة",
-                        onClick = { SystemIntents.openWebsiteOrPayment(context, url) },
-                    )
-                }
-                if (!contact.address.isNullOrBlank() || contact.latitude != null) {
-                    val locText = listOfNotNull(contact.district, contact.address).distinct().joinToString(" - ")
-                        .ifBlank { "${contact.latitude}, ${contact.longitude}" }
-                    ActionInfoRow(
-                        icon = Icons.Rounded.LocationOn,
-                        label = locText,
-                        actionLabel = "Google Maps",
-                        onClick = {
-                            SystemIntents.openGoogleMaps(
-                                context,
-                                contact.latitude,
-                                contact.longitude,
-                                contact.address ?: contact.district ?: contact.displayName,
-                            )
-                        },
-                    )
-                }
+            // Emails, Telegram handle, Website, and always-accessible Google Maps link
+            HorizontalDivider()
+            Text("الموقع وبيانات التواصل", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+            contact.emails.forEach { email ->
+                ActionInfoRow(
+                    icon = Icons.Rounded.Email,
+                    label = email,
+                    actionLabel = "مراسلة",
+                    onClick = { SystemIntents.sendEmail(context, email) },
+                )
             }
+            contact.telegramHandle?.takeIf { it.isNotBlank() }?.let { handle ->
+                ActionInfoRow(
+                    icon = Icons.AutoMirrored.Rounded.Send,
+                    label = "Telegram: $handle",
+                    actionLabel = "فتح",
+                    onClick = { SystemIntents.openTelegram(context, handle) },
+                )
+            }
+            contact.website?.takeIf { it.isNotBlank() }?.let { url ->
+                ActionInfoRow(
+                    icon = Icons.Rounded.Language,
+                    label = url,
+                    actionLabel = "زيارة",
+                    onClick = { SystemIntents.openWebsiteOrPayment(context, url) },
+                )
+            }
+            val mapLabel = listOfNotNull(contact.district, contact.address)
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+                .joinToString(" - ")
+                .ifBlank {
+                    if (contact.latitude != null && contact.longitude != null) {
+                        "${contact.latitude}, ${contact.longitude}"
+                    } else {
+                        "فتح الموقع في خرائط Google"
+                    }
+                }
+            val mapQuery = listOfNotNull(contact.address, contact.district, contact.displayName)
+                .firstOrNull { !it.isNullOrBlank() }
+            ActionInfoRow(
+                icon = Icons.Rounded.LocationOn,
+                label = mapLabel,
+                actionLabel = "Google Maps",
+                onClick = {
+                    SystemIntents.openGoogleMaps(
+                        context,
+                        contact.latitude,
+                        contact.longitude,
+                        mapQuery,
+                    )
+                },
+            )
 
             // Dual Payment Section: Option 1 (USSD Codes) + Option 2 (Direct Apps & Meeza QR)
             if (allPhones.isNotEmpty()) {
@@ -794,7 +802,7 @@ fun ContactDetailBottomSheet(
                                     )
                                     val statusLabel = when (rec.status) {
                                         "READY" -> "تم التفريغ والتحليل"
-                                        "PROCESSING" -> "جاري تفريغ الصوت بـ Gemini..."
+                                        "PROCESSING" -> "جاري تفريغ وتحليل الصوت..."
                                         "PENDING" -> "في انتظار التفريغ"
                                         "ERROR" -> "تعذر التفريغ — أعد المحاولة"
                                         else -> "مكالمة مسجلة باللوج"

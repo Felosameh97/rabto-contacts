@@ -15,10 +15,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.FolderCopy
+import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Map
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.AlertDialog
@@ -72,13 +71,12 @@ import com.example.domain.model.ContactRecord
 import com.example.ui.components.AiAssistantSheet
 import com.example.ui.components.ContactDetailBottomSheet
 import com.example.ui.components.ContactEditorDialog
-import com.example.ui.components.DialpadScreen
+import com.example.ui.components.LiveTranscriberSheet
 import com.example.ui.components.QrScannerDialog
 import com.example.ui.components.WhatsAppCaptureDialog
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CategoriesScreen
 import com.example.ui.screens.HomeScreen
-import com.example.ui.screens.MapScreen
 import com.example.ui.screens.ToolsSyncScreen
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.RabtaContactsTheme
@@ -96,9 +94,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable object RouteHome
 @Serializable object RouteCategories
-@Serializable object RouteMap
 @Serializable object RouteTools
-@Serializable object RouteDialpad
 
 class MainActivity : ComponentActivity() {
     private var incomingShareText by mutableStateOf<String?>(null)
@@ -274,7 +270,6 @@ private fun AuthenticatedMainScreen(
     val categoryContacts by viewModel.categoryContacts.collectAsStateWithLifecycle()
     val selectedContact by viewModel.selectedContact.collectAsStateWithLifecycle()
     val selectedBulk by viewModel.selectedForBulk.collectAsStateWithLifecycle()
-    val geoContacts by viewModel.geoContacts.collectAsStateWithLifecycle()
     val syncedContacts by viewModel.syncedDeviceContacts.collectAsStateWithLifecycle()
     val paymentTemplates by viewModel.paymentTemplates.collectAsStateWithLifecycle()
     val githubRepoSlug by viewModel.githubRepoSlug.collectAsStateWithLifecycle()
@@ -303,12 +298,15 @@ private fun AuthenticatedMainScreen(
     var showEditor by remember { mutableStateOf(false) }
     var showWaCapture by remember { mutableStateOf(false) }
     var showQrScanner by remember { mutableStateOf(false) }
+    var dialpadExpanded by remember { mutableStateOf(false) }
     var dialpadSeed by remember { mutableStateOf("") }
     var showAiSheet by remember { mutableStateOf(false) }
+    var showLiveTranscriber by remember { mutableStateOf(false) }
 
-    fun openDialpadTab(seed: String = "") {
+    fun openIntegratedKeypad(seed: String = "") {
         dialpadSeed = seed
-        navController.navigate(RouteDialpad) {
+        dialpadExpanded = true
+        navController.navigate(RouteHome) {
             launchSingleTop = true
             restoreState = true
             popUpTo(RouteHome) { saveState = true }
@@ -320,7 +318,7 @@ private fun AuthenticatedMainScreen(
             viewModel.handleIncomingShareOrDeepLink(incomingShareText, incomingVCardText)
             onConsumeIncoming()
         } else if (requestedOpenDialpad) {
-            openDialpadTab(requestedDialDigits.orEmpty())
+            openIntegratedKeypad(requestedDialDigits.orEmpty())
             onConsumeIncoming()
         } else if (requestedOpenAi) {
             showAiSheet = true
@@ -335,16 +333,14 @@ private fun AuthenticatedMainScreen(
         }
     }
 
-    // 5 bottom navigation destinations with Keypad ("الكيباد") as the 5th bottom button
+    // 3 clean tabs — Keypad is docked smoothly inside Home, and Map opens from inside every contact
     val navItems = listOf(
         Triple(RouteHome, R.string.nav_home, Icons.Rounded.Home),
         Triple(RouteCategories, R.string.nav_categories, Icons.Rounded.FolderCopy),
-        Triple(RouteMap, R.string.nav_map, Icons.Rounded.Map),
         Triple(RouteTools, R.string.nav_tools, Icons.Rounded.Sync),
-        Triple(RouteDialpad, R.string.nav_dialpad, Icons.Rounded.Dialpad),
     )
 
-    val isOnDialpad = currentDest?.hasRoute(RouteDialpad::class) == true
+    val isOnHome = currentDest?.hasRoute(RouteHome::class) != false
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
@@ -355,6 +351,12 @@ private fun AuthenticatedMainScreen(
                 CenterAlignedTopAppBar(
                     title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
                     actions = {
+                        IconButton(
+                            onClick = { showLiveTranscriber = true },
+                            modifier = Modifier.testTag("topbar_live_transcriber_btn"),
+                        ) {
+                            Icon(Icons.Rounded.GraphicEq, contentDescription = "تفريغ صوتي مباشر")
+                        }
                         IconButton(
                             onClick = { showAiSheet = true },
                             modifier = Modifier.testTag("topbar_ai_btn"),
@@ -394,7 +396,7 @@ private fun AuthenticatedMainScreen(
                 }
             },
             floatingActionButton = {
-                if (!isOnDialpad) {
+                if (!(isOnHome && dialpadExpanded)) {
                     FloatingActionButton(
                         onClick = {
                             editingContact = null
@@ -455,6 +457,23 @@ private fun AuthenticatedMainScreen(
                                 preferredSimSlot = preferredSimSlot,
                                 strictPhonebookIsolation = strictIsolation,
                                 recentTranscripts = callTranscripts,
+                                dialpadExpanded = dialpadExpanded,
+                                dialpadSeed = dialpadSeed,
+                                dialpadMatches = dialpadMatches,
+                                dialHistory = dialHistory,
+                                recentlyDeletedHistory = recentlyDeletedDial,
+                                paymentTemplates = paymentTemplates,
+                                onSetDialpadExpanded = { expanded -> dialpadExpanded = expanded },
+                                onDialpadQueryChange = viewModel::searchForDialpad,
+                                onRecordDial = viewModel::recordDialHistoryDraft,
+                                onSoftDeleteDialHistory = viewModel::softDeleteDialHistory,
+                                onRestoreDialHistory = viewModel::restoreDialHistory,
+                                onEmptyDialTrash = viewModel::emptyDialTrash,
+                                onSaveDialNumber = { num ->
+                                    editingContact = ContactRecord(primaryPhone = num, phones = listOf(num))
+                                    editorCategorySeed = ""
+                                    showEditor = true
+                                },
                                 onSearchQueryChange = viewModel::updateSearchQuery,
                                 onOpenContact = viewModel::openContact,
                                 onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
@@ -468,7 +487,7 @@ private fun AuthenticatedMainScreen(
                                     navController.navigate(RouteCategories) { launchSingleTop = true }
                                 },
                                 onOpenQrScanner = { showQrScanner = true },
-                                onOpenDialpad = { openDialpadTab() },
+                                onOpenLiveTranscriber = { showLiveTranscriber = true },
                                 onOpenAiAssistant = { showAiSheet = true },
                                 onImportBundledCsv = { viewModel.importBundledDatasets(uploadToCloud = true) },
                                 onSyncWeeklyWhatsApp = viewModel::syncWeeklyActiveWhatsAppToPhonebook,
@@ -506,12 +525,6 @@ private fun AuthenticatedMainScreen(
                                 onShareExport = viewModel::shareBulkOrCategory,
                             )
                         }
-                        composable<RouteMap> {
-                            MapScreen(
-                                geoContacts = geoContacts,
-                                onOpenContact = viewModel::openContact,
-                            )
-                        }
                         composable<RouteTools> {
                             ToolsSyncScreen(
                                 userEmail = user.email,
@@ -542,6 +555,7 @@ private fun AuthenticatedMainScreen(
                                 onSetSimPreference = viewModel::setSimPreference,
                                 onDeleteRecording = viewModel::deleteRecording,
                                 onTranscribeRecording = viewModel::transcribeRecordingItem,
+                                onOpenLiveTranscriber = { showLiveTranscriber = true },
                                 onImportBundledCsv = { viewModel.importBundledDatasets(uploadToCloud = true) },
                                 onImportDevicePhonebook = { viewModel.importDevicePhonebookContacts(uploadToCloud = true) },
                                 onScanGoogleDrive = viewModel::scanGoogleDriveWithToken,
@@ -561,29 +575,6 @@ private fun AuthenticatedMainScreen(
                                 onRunAiBilingualEnrich = {
                                     showAiSheet = true
                                     viewModel.runAiBilingualEnrichBatch()
-                                },
-                            )
-                        }
-                        composable<RouteDialpad> {
-                            DialpadScreen(
-                                initialDigits = dialpadSeed,
-                                matches = dialpadMatches,
-                                dialHistory = dialHistory,
-                                recentlyDeletedHistory = recentlyDeletedDial,
-                                paymentTemplates = paymentTemplates,
-                                showContactPhotos = showContactPhotos,
-                                preferredSimSlot = preferredSimSlot,
-                                onQueryChange = viewModel::searchForDialpad,
-                                onRecordDial = viewModel::recordDialHistoryDraft,
-                                onSoftDeleteHistory = viewModel::softDeleteDialHistory,
-                                onRestoreHistory = viewModel::restoreDialHistory,
-                                onEmptyTrash = viewModel::emptyDialTrash,
-                                onOpenContact = viewModel::openContact,
-                                onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
-                                onSaveNewNumber = { num ->
-                                    editingContact = ContactRecord(primaryPhone = num, phones = listOf(num))
-                                    editorCategorySeed = ""
-                                    showEditor = true
                                 },
                             )
                         }
@@ -636,6 +627,19 @@ private fun AuthenticatedMainScreen(
         )
     }
 
+    if (showLiveTranscriber) {
+        LiveTranscriberSheet(
+            onSaveTranscript = { raw, name, phone ->
+                viewModel.saveLiveSpeechTranscript(
+                    rawText = raw,
+                    contactNameInput = name,
+                    phoneInput = phone,
+                )
+            },
+            onDismiss = { showLiveTranscriber = false },
+        )
+    }
+
     if (showAiSheet) {
         AiAssistantSheet(
             uiState = aiUiState,
@@ -645,10 +649,6 @@ private fun AuthenticatedMainScreen(
                     onNavigateToCategory = {
                         showAiSheet = false
                         navController.navigate(RouteCategories) { launchSingleTop = true }
-                    },
-                    onNavigateToMap = {
-                        showAiSheet = false
-                        navController.navigate(RouteMap) { launchSingleTop = true }
                     },
                 )
             },

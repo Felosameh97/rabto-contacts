@@ -3,11 +3,10 @@
     <string name="tagline">مدير جهات الاتصال والمكالمات الذكي</string>
     <string name="nav_home">الرئيسية</string>
     <string name="nav_categories">الفئات</string>
-    <string name="nav_map">الخريطة</string>
     <string name="nav_tools">الإعدادات</string>
     <string name="nav_dialpad">الكيباد</string>
     <string name="sign_in_title">مرحباً بك في Felo Contacts</string>
-    <string name="sign_in_subtitle">إدارة ذكية لـ 20,000+ رقم، اتصال dual-SIM، تفريغ المكالمات، فئات متداخلة، وروابط الدفع.</string>
+    <string name="sign_in_subtitle">إدارة ذكية لـ 20,000+ رقم، اتصال dual-SIM، تفريغ صوتي فوري، فئات متداخلة، وروابط الدفع.</string>
     <string name="sign_in_google">تسجيل الدخول عبر Google</string>
     <string name="search_hint">ابحث بالاسم، الرقم، التاجز، أو المنطقة...</string>
     <string name="frequent_callers_title">المتصل بهم كثيراً</string>
@@ -24,7 +23,6 @@
     <string name="check_updates">فحص تحديثات GitHub</string>
     <string name="grant_call_log">منح صلاحية سجل المكالمات</string>
     <string name="grant_contacts_sync">منح صلاحية مزامنة الهاتف الانتقائية</string>
-    <string name="grant_location">تحديد موقعي على الخريطة</string>
     <string name="grant_camera">منح صلاحية الكاميرا لمسح QR</string>
     <string name="call_action">اتصال</string>
     <string name="whatsapp_action">واتساب</string>

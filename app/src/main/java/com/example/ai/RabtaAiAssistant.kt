@@ -103,6 +103,17 @@ class RabtaAiAssistant {
 
     private val commandModel by lazy {
         Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = commandSchema
+                temperature = 0.2f
+            },
+        )
+    }
+
+    private val commandFallbackModel by lazy {
+        Firebase.ai.generativeModel(
             modelName = "gemini-3.8-flash",
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
@@ -114,7 +125,7 @@ class RabtaAiAssistant {
 
     private val classifyModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
+            modelName = "gemini-3.5-flash-lite",
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = classifySchema
@@ -137,15 +148,22 @@ class RabtaAiAssistant {
                 appendLine("- SEARCH: إذا أراد البحث عن رقم أو مهنة (مثل كهربائي في المطرية)")
                 appendLine("- ADD_CONTACT: إذا أراد حفظ/إضافة جهة اتصال جديدة بالاسم والرقم")
                 appendLine("- OPEN_CATEGORY: إذا أراد فتح تصنيف/ليبل معين (مثال: الجامعة > الأكاديمية (EAEAT) > دفعة 2023)")
-                appendLine("- MAP_DISTRICT: إذا أراد إظهار جهات اتصال منطقة معينة على الخريطة")
                 appendLine("- PAYMENT: إذا أراد تحويل مبلغ فودافون كاش / انستاباي / أورانج كاش لشخص")
                 appendLine("- AUTO_CATEGORIZE: إذا طلب تصنيف أو تنظيم الأرقام غير المصنفة بالذكاء الاصطناعي")
                 appendLine("- ANSWER: لأي سؤال عام أو استفسار نصي")
                 appendLine("أرجع JSON مطابق للمخطط المطلوب فقط.")
             }
 
-            val response = withTimeout(60_000L) {
-                commandModel.generateContent(prompt)
+            val response = withTimeout(45_000L) {
+                try {
+                    commandModel.generateContent(prompt)
+                } catch (primaryErr: Exception) {
+                    if (isQuotaOrRateError(primaryErr)) {
+                        commandFallbackModel.generateContent(prompt)
+                    } else {
+                        throw primaryErr
+                    }
+                }
             }
             val jsonString = response.text
                 ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً"))
@@ -199,7 +217,7 @@ class RabtaAiAssistant {
 
     private val enrichModel by lazy {
         Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
+            modelName = "gemini-3.5-flash-lite",
             generationConfig = generationConfig {
                 responseMimeType = "application/json"
                 responseSchema = bilingualTagSchema
@@ -375,6 +393,17 @@ class RabtaAiAssistant {
         )
     }
 
+    private val callAnalysisFallbackModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.5-flash-lite",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = callAnalysisSchema
+                temperature = 0.2f
+            },
+        )
+    }
+
     suspend fun analyzeCallRecording(
         audioFile: File,
         contactName: String,
@@ -409,7 +438,15 @@ class RabtaAiAssistant {
             }
 
             val response = withTimeout(60_000L) {
-                callAnalysisModel.generateContent(prompt)
+                try {
+                    callAnalysisModel.generateContent(prompt)
+                } catch (primaryErr: Exception) {
+                    if (isQuotaOrRateError(primaryErr)) {
+                        callAnalysisFallbackModel.generateContent(prompt)
+                    } else {
+                        throw primaryErr
+                    }
+                }
             }
             val jsonString = response.text
                 ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً أثناء تحليل المكالمة"))
@@ -447,16 +484,26 @@ class RabtaAiAssistant {
     }
 
     companion object {
+        fun isQuotaOrRateError(e: Throwable): Boolean {
+            val raw = (e.localizedMessage ?: e.message.orEmpty()).lowercase(Locale.US)
+            return raw.contains("quota") || raw.contains("exceeded") || raw.contains("resource_exhausted") || raw.contains("429") || raw.contains("rate limit")
+        }
+
         private fun formatAiError(e: Exception): Exception {
             val raw = e.localizedMessage ?: e.message.orEmpty()
             val lower = raw.lowercase(Locale.US)
-            return if (lower.contains("app check") || lower.contains("token is invalid") || lower.contains("403")) {
-                IllegalStateException(
-                    "$raw\n\nتأكد من اتصال الإنترنت ووجود Google Play Services محدث على الجهاز، أو أدخل Debug Token مخصص من الإعدادات > حالة Gemini و App Check.",
+            return when {
+                isQuotaOrRateError(e) -> IllegalStateException(
+                    "رصيد طلبات Gemini السحابي وصل للحد المجاني حالياً (Quota Exceeded).\n" +
+                        "• استخدم «التفريغ الصوتي المباشر» من الرئيسية أو شاشة المكالمة مجاناً وبدون Gemini.\n" +
+                        "• التصنيف الذكي والبحث والأوامر السريعة شغالة محلياً بدون أي رصيد.",
                     e,
                 )
-            } else {
-                e
+                lower.contains("app check") || lower.contains("token is invalid") || lower.contains("403") -> IllegalStateException(
+                    "$raw\n\nتأكد من اتصال الإنترنت ووجود Google Play Services، أو أعد تشغيل التطبيق.",
+                    e,
+                )
+                else -> e
             }
         }
 

@@ -157,7 +157,7 @@ class SyncPrefsDataStore(private val context: Context) {
     }
 
     val autoRecordCallsFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
-        prefs[autoRecordKey] ?: false
+        prefs[autoRecordKey] ?: true
     }
 
     val showContactPhotosFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
@@ -173,7 +173,7 @@ class SyncPrefsDataStore(private val context: Context) {
     }
 
     val autoTranscribeCallsFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
-        prefs[autoTranscribeKey] ?: true
+        prefs[autoTranscribeKey] ?: false
     }
 
     val simPreferenceFlow: Flow<SimPreference> = context.dataStore.data.map { prefs ->

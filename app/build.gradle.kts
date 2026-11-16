@@ -18,8 +18,8 @@ android {
     applicationId = "com.aistudio.rabtacontacts.k7m2px"
     minSdk = 24
     targetSdk = 36
-    versionCode = 4
-    versionName = "3.1"
+    versionCode = 5
+    versionName = "4.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -130,8 +130,8 @@ dependencies {
   implementation(libs.logging.interceptor)
   implementation(libs.moshi.kotlin)
   implementation(libs.okhttp)
-  implementation(libs.osmdroid.android)
-  implementation(libs.play.services.location)
+  // implementation(libs.osmdroid.android)
+  // implementation(libs.play.services.location)
   implementation(libs.retrofit)
   implementation(libs.zxing.core)
   testImplementation(libs.androidx.compose.ui.test.junit4)

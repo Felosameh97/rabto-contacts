@@ -39,7 +39,7 @@ object CallRecorderManager {
     @Synchronized
     fun startRecording(context: Context, labelOrNumber: String): Result<File> {
         if (!hasRecordPermission(context)) {
-            return Result.failure(SecurityException("صلاحية الميكروفون (RECORD_AUDIO) غير ممنوحة"))
+            return Result.failure(SecurityException("صلاحية الميكروفون (RECORD_AUDIO) غير ممنوحة — اضغط للتفعيل"))
         }
         if (recorder != null) {
             currentFile?.let { return Result.success(it) }
@@ -53,13 +53,18 @@ object CallRecorderManager {
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val outFile = File(recordingsDir(context), "rabta_${cleanLabel}_$stamp.m4a")
 
+        // Try cellular/recognition sources ordered for broad Android 8-16 OEM compatibility.
+        // 16kHz mono AAC works reliably on voice DSP paths where 44.1kHz fails prepare()/start().
         val sources = listOf(
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_CALL to "VOICE_CALL",
+            MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION",
+            MediaRecorder.AudioSource.CAMCORDER to "CAMCORDER",
+            MediaRecorder.AudioSource.MIC to "MIC",
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION to "VOICE_COMMUNICATION",
         )
 
         var lastError: Throwable? = null
-        for (source in sources) {
+        for ((source, sourceName) in sources) {
             val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 MediaRecorder(context.applicationContext)
             } else {
@@ -70,22 +75,29 @@ object CallRecorderManager {
                 mr.setAudioSource(source)
                 mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
                 mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                mr.setAudioEncodingBitRate(96_000)
-                mr.setAudioSamplingRate(44_100)
+                mr.setAudioChannels(1)
+                mr.setAudioSamplingRate(16_000)
+                mr.setAudioEncodingBitRate(32_000)
                 mr.setOutputFile(outFile.absolutePath)
                 mr.prepare()
                 mr.start()
                 recorder = mr
                 currentFile = outFile
+                Log.d(TAG, "Recording started via $sourceName -> ${outFile.name}")
                 return Result.success(outFile)
             } catch (e: Exception) {
                 lastError = e
-                Log.w(TAG, "AudioSource $source failed: ${e.message}")
+                Log.w(TAG, "AudioSource $sourceName failed: ${e.message}")
                 runCatching { mr.release() }
             }
         }
         runCatching { outFile.delete() }
-        return Result.failure(lastError ?: IllegalStateException("تعذر بدء تسجيل المكالمة على هذا الجهاز"))
+        return Result.failure(
+            IllegalStateException(
+                "تعذر فتح مسار التسجيل (${lastError?.localizedMessage ?: "مقيد من النظام"}) — جرّب التفريغ المباشر أو السبيكر",
+                lastError,
+            )
+        )
     }
 
     @Synchronized
@@ -100,7 +112,7 @@ object CallRecorderManager {
             Log.w(TAG, "MediaRecorder stop warning: ${it.message}")
         }
         runCatching { mr.release() }
-        return if (file != null && file.exists() && file.length() > 512) {
+        return if (file != null && file.exists() && file.length() > 256) {
             file
         } else {
             file?.delete()

@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DriveFolderUpload
 import androidx.compose.material.icons.rounded.FileOpen
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -124,7 +125,7 @@ fun ToolsSyncScreen(
     showContactPhotos: Boolean = true,
     callPhotoBackground: Boolean = true,
     strictPhonebookIsolation: Boolean = true,
-    autoTranscribeCalls: Boolean = true,
+    autoTranscribeCalls: Boolean = false,
     simPreference: SimPreference = SimPreference.ASK_OR_BOTH,
     callTranscripts: List<CallTranscriptRecord> = emptyList(),
     onSetThemeMode: (ThemeMode) -> Unit,
@@ -137,6 +138,7 @@ fun ToolsSyncScreen(
     onSetSimPreference: (SimPreference) -> Unit = {},
     onDeleteRecording: (CallRecordingItem) -> Unit,
     onTranscribeRecording: (CallRecordingItem) -> Unit = {},
+    onOpenLiveTranscriber: () -> Unit = {},
     onImportBundledCsv: () -> Unit,
     onImportDevicePhonebook: () -> Unit,
     onScanGoogleDrive: (String) -> Unit,
@@ -162,6 +164,11 @@ fun ToolsSyncScreen(
     var showAddPayment by remember { mutableStateOf(false) }
     var driveErrorMsg by remember { mutableStateOf<String?>(null) }
     var isDefaultDialer by remember { mutableStateOf(RabtaInCallService.isDefaultDialer(context)) }
+    var hasMicPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
     var playingPath by remember { mutableStateOf<String?>(null) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
 
@@ -214,6 +221,7 @@ fun ToolsSyncScreen(
     val recordAudioPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
+        hasMicPermission = granted
         if (granted) onSetAutoRecordCalls(true)
     }
 
@@ -334,8 +342,8 @@ fun ToolsSyncScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("تفريغ وتنظيم المكالمات تلقائياً بـ Gemini", style = MaterialTheme.typography.titleSmall)
-                            Text("بعد المكالمة المسجلة يتم استخراج النص والهايلايتس والمواعيد للتقويم والملاحظات.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("تفريغ المكالمات تلقائياً بـ Gemini (اختياري)", style = MaterialTheme.typography.titleSmall)
+                            Text("يستهلك رصيد Gemini بعد كل مكالمة. مفرغ الصوت المباشر يعمل مجاناً وبدون حد.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(
                             checked = autoTranscribeCalls,
@@ -433,6 +441,24 @@ fun ToolsSyncScreen(
                             Text("تعيين Felo Contacts كتطبيق الاتصال الافتراضي")
                         }
                     }
+                    if (!hasMicPermission) {
+                        FilledTonalButton(
+                            onClick = { recordAudioPermLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+                            modifier = Modifier.fillMaxWidth().testTag("tools_grant_mic_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("منح صلاحية الميكروفون للتسجيل والتفريغ الحي")
+                        }
+                    }
+                    FilledTonalButton(
+                        onClick = onOpenLiveTranscriber,
+                        modifier = Modifier.fillMaxWidth().testTag("tools_open_live_transcriber_btn"),
+                    ) {
+                        Icon(Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("فتح مفرغ الصوت المباشر (مجاناً بدون Gemini)")
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -441,7 +467,7 @@ fun ToolsSyncScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("تسجيل المكالمات تلقائياً (.m4a)", style = MaterialTheme.typography.titleSmall)
                             Text(
-                                "ملاحظة: أندرويد 10+ قد يلتقط صوت الطرف الآخر بوضوح أكبر عند تفعيل السبيكر حسب نوع الهاتف.",
+                                "يعمل عبر خدمة الميكروفون الأمامية مع تعدد مصادر الصوت؛ تشغيل السبيكر يوضح صوت الطرف الآخر على بعض الهواتف.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

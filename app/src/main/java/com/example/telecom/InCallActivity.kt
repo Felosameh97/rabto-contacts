@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AssistChip
@@ -98,10 +99,18 @@ private fun InCallScreen(
     val state by RabtaInCallService.uiState.collectAsStateWithLifecycle()
     var showKeypad by remember { mutableStateOf(false) }
 
+    var pendingPermAction by remember { mutableStateOf<String?>(null) }
     val recordPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) RabtaInCallService.toggleRecording()
+        if (granted) {
+            if (pendingPermAction == "LIVE") {
+                RabtaInCallService.toggleLiveTranscription()
+            } else {
+                RabtaInCallService.toggleRecording()
+            }
+        }
+        pendingPermAction = null
     }
 
     LaunchedEffect(state.hasActiveCall, state.callState) {
@@ -215,13 +224,29 @@ private fun InCallScreen(
                     state.recordingStatusNote?.let { note ->
                         Surface(
                             shape = RoundedCornerShape(12.dp),
-                            color = if (state.isRecording) ErrorRed.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                            color = if (state.isRecording || state.isLiveTranscribing) ErrorRed.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceContainerLow,
                         ) {
                             Text(
                                 text = note,
                                 style = MaterialTheme.typography.labelMedium,
-                                color = if (state.isRecording) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                color = if (state.isRecording || state.isLiveTranscribing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+
+                    if (state.isLiveTranscribing || state.liveTranscriptText.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = Color.Black.copy(alpha = 0.45f),
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                        ) {
+                            Text(
+                                text = state.liveTranscriptText.ifBlank { "جاري الاستماع وتفريغ الكلام مباشرة..." },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = Color.White,
+                                maxLines = 4,
+                                modifier = Modifier.padding(12.dp),
                             )
                         }
                     }
@@ -289,7 +314,7 @@ private fun InCallScreen(
                         )
                         CallActionToggle(
                             icon = if (state.isRecording) Icons.Rounded.Stop else Icons.Rounded.FiberManualRecord,
-                            label = if (state.isRecording) "إيقاف التسجيل" else "تسجيل",
+                            label = if (state.isRecording) "إيقاف" else "تسجيل",
                             active = state.isRecording,
                             activeColor = ErrorRed,
                             labelColor = primaryTextColor,
@@ -297,6 +322,22 @@ private fun InCallScreen(
                                 if (CallRecorderManager.hasRecordPermission(context)) {
                                     RabtaInCallService.toggleRecording()
                                 } else {
+                                    pendingPermAction = "REC"
+                                    recordPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                        )
+                        CallActionToggle(
+                            icon = Icons.Rounded.RecordVoiceOver,
+                            label = if (state.isLiveTranscribing) "إيقاف النص" else "تفريغ حي",
+                            active = state.isLiveTranscribing,
+                            activeColor = WhatsAppGreen,
+                            labelColor = primaryTextColor,
+                            onClick = {
+                                if (CallRecorderManager.hasRecordPermission(context)) {
+                                    RabtaInCallService.toggleLiveTranscription()
+                                } else {
+                                    pendingPermAction = "LIVE"
                                     recordPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 }
                             },
