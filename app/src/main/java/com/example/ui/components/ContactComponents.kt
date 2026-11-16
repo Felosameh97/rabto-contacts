@@ -1,10 +1,16 @@
 package com.example.ui.components
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.MediaPlayer
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -31,6 +37,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -41,13 +49,19 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LocationOn
+import androidx.compose.material.icons.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCode2
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.SimCard
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarBorder
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -55,6 +69,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -73,31 +88,44 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
+import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.PaymentTemplate
 import com.example.ui.theme.InstaPayPurple
 import com.example.ui.theme.TelegramBlue
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.ContactPhotoStorage
 import com.example.util.EgyptGeoLookup
 import com.example.util.PaymentUtils
 import com.example.util.PhoneUtils
 import com.example.util.QrUtils
+import com.example.util.SimUtils
 import com.example.util.SystemIntents
 import com.example.util.VCardUtils
+import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun ContactSummaryCard(
@@ -105,6 +133,7 @@ fun ContactSummaryCard(
     onClick: () -> Unit,
     onCall: (String) -> Unit,
     onWhatsApp: (String) -> Unit,
+    showPhoto: Boolean = true,
     bulkMode: Boolean = false,
     isSelected: Boolean = false,
     onToggleSelect: () -> Unit = {},
@@ -190,6 +219,7 @@ fun ContactSummaryCard(
                         onCheckedChange = { onToggleSelect() },
                     )
                 } else {
+                    val hasPhoto = showPhoto && !contact.photoUri.isNullOrBlank() && File(contact.photoUri).exists()
                     Box(
                         modifier = Modifier
                             .size(46.dp)
@@ -197,12 +227,21 @@ fun ContactSummaryCard(
                             .background(MaterialTheme.colorScheme.primaryContainer),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            fontWeight = FontWeight.Bold,
-                        )
+                        if (hasPhoto) {
+                            AsyncImage(
+                                model = File(contact.photoUri!!),
+                                contentDescription = contact.displayName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Text(
+                                text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
                     }
                 }
 
@@ -283,6 +322,9 @@ fun ContactSummaryCard(
 fun ContactDetailBottomSheet(
     contact: ContactRecord,
     paymentTemplates: List<PaymentTemplate>,
+    contactTranscripts: List<CallTranscriptRecord> = emptyList(),
+    showPhoto: Boolean = true,
+    preferredSimSlot: Int? = null,
     onDismiss: () -> Unit,
     onToggleFavorite: (ContactRecord) -> Unit,
     onEdit: (ContactRecord) -> Unit,
@@ -290,15 +332,73 @@ fun ContactDetailBottomSheet(
     onWhatsApp: (ContactRecord, String) -> Unit,
     onToggleDeviceSync: (ContactRecord) -> Unit,
     onAddPaymentTemplate: (String, String) -> Unit,
+    onUpdatePhoto: (ContactRecord, String?) -> Unit = { _, _ -> },
+    onAnalyzeCallAudio: (CallTranscriptRecord) -> Unit = {},
+    onSaveCallNotes: (CallTranscriptRecord) -> Unit = {},
+    onMarkCalendarAdded: (String) -> Unit = {},
+    onRecordCall: (String) -> Unit = {},
     onSearchByTag: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var showQrDialog by remember { mutableStateOf(false) }
     var showMeezaQrDialog by remember { mutableStateOf(false) }
     var showAddPaymentDialog by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var paymentAmount by remember { mutableStateOf("") }
+    var playingTranscriptId by remember { mutableStateOf<String?>(null) }
+    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var sims by remember { mutableStateOf(SimUtils.getAvailableSims(context)) }
+    var pendingCallPhone by remember { mutableStateOf("") }
+    var pendingCallSlot by remember { mutableStateOf<Int?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            runCatching {
+                mediaPlayer?.stop()
+                mediaPlayer?.release()
+            }
+        }
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val savedPath = ContactPhotoStorage.savePickedPhoto(context, uri, contact.id)
+                if (savedPath != null) {
+                    onUpdatePhoto(contact, savedPath)
+                }
+            }
+        }
+    }
+
+    val callPermsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        sims = SimUtils.getAvailableSims(context)
+        val num = pendingCallPhone
+        if (num.isNotBlank()) {
+            onRecordCall(num)
+            SystemIntents.dialPhoneWithSimSlot(context, num, pendingCallSlot)
+        }
+        pendingCallPhone = ""
+    }
+
+    fun placeCall(phone: String, slotIndex: Int?) {
+        val hasCall = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        val hasPhoneState = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+        if (hasCall && hasPhoneState) {
+            onRecordCall(phone)
+            SystemIntents.dialPhoneWithSimSlot(context, phone, slotIndex)
+        } else {
+            pendingCallPhone = phone
+            pendingCallSlot = slotIndex
+            callPermsLauncher.launch(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.READ_PHONE_STATE))
+        }
+    }
 
     val allPhones = remember(contact) {
         (listOf(contact.primaryPhone) + contact.phones).filter { it.isNotBlank() }.distinct()
@@ -320,24 +420,55 @@ fun ContactDetailBottomSheet(
                 .padding(bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            // Header
+            // Header with Tappable Photo Picker Avatar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                val hasPhoto = showPhoto && !contact.photoUri.isNullOrBlank() && File(contact.photoUri).exists()
                 Box(
                     modifier = Modifier
-                        .size(56.dp)
+                        .size(64.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
+                        .background(MaterialTheme.colorScheme.primaryContainer)
+                        .clickable {
+                            photoPickerLauncher.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        }
+                        .testTag("detail_photo_picker_btn"),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
+                    if (hasPhoto) {
+                        AsyncImage(
+                            model = File(contact.photoUri!!),
+                            contentDescription = contact.displayName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Text(
+                            text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
+                            style = MaterialTheme.typography.headlineSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .size(22.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PhotoCamera,
+                            contentDescription = "تغيير الصورة",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(13.dp),
+                        )
+                    }
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(contact.displayName, style = MaterialTheme.typography.headlineSmall)
@@ -409,13 +540,23 @@ fun ContactDetailBottomSheet(
                                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
+                                val sim1 = sims.getOrNull(0)
+                                val sim2 = sims.getOrNull(1)
                                 FilledTonalButton(
-                                    onClick = { SystemIntents.dialPhone(context, phone) },
-                                    modifier = Modifier.testTag("detail_call_btn"),
+                                    onClick = { placeCall(phone, sim1?.slotIndex ?: 0) },
+                                    modifier = Modifier.testTag("detail_call_sim1_btn"),
                                 ) {
-                                    Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp))
-                                    Spacer(Modifier.width(6.dp))
-                                    Text("اتصال")
+                                    Icon(Icons.Rounded.SimCard, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (sim1 != null && sim1.carrierName.isNotBlank()) "SIM 1 (${sim1.carrierName.take(8)})" else "SIM 1")
+                                }
+                                FilledTonalButton(
+                                    onClick = { placeCall(phone, sim2?.slotIndex ?: 1) },
+                                    modifier = Modifier.testTag("detail_call_sim2_btn"),
+                                ) {
+                                    Icon(Icons.Rounded.SimCard, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(if (sim2 != null && sim2.carrierName.isNotBlank()) "SIM 2 (${sim2.carrierName.take(8)})" else "SIM 2")
                                 }
                                 if (!PhoneUtils.isUssdOrShortCode(phone)) {
                                     Button(
@@ -576,6 +717,175 @@ fun ContactDetailBottomSheet(
                             onCopy = { copyToClipboard(context, PhoneUtils.toLocalEgyptianPhone(targetPhone)) },
                             tag = "payment_tpl_${tpl.id}",
                         )
+                    }
+                }
+            }
+
+            // Call Logs, Audio Playback & AI Transcripts / Calendar Organizer Section
+            if (contactTranscripts.isNotEmpty()) {
+                HorizontalDivider()
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(Icons.Rounded.RecordVoiceOver, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "سجل المكالمات والتسجيلات والترانسكريبشن (${contactTranscripts.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                val fmt = remember { SimpleDateFormat("dd/MM/yyyy • HH:mm", Locale.getDefault()) }
+                contactTranscripts.forEach { rec ->
+                    val audioFile = remember(rec.audioFilePath) {
+                        rec.audioFilePath.takeIf { it.isNotBlank() }?.let { File(it) }?.takeIf { it.exists() }
+                    }
+                    val isPlaying = playingTranscriptId == rec.id
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                if (audioFile != null) {
+                                    FilledTonalIconButton(
+                                        onClick = {
+                                            if (isPlaying) {
+                                                runCatching {
+                                                    mediaPlayer?.stop()
+                                                    mediaPlayer?.release()
+                                                }
+                                                mediaPlayer = null
+                                                playingTranscriptId = null
+                                            } else {
+                                                runCatching {
+                                                    mediaPlayer?.stop()
+                                                    mediaPlayer?.release()
+                                                    mediaPlayer = MediaPlayer().apply {
+                                                        setDataSource(audioFile.absolutePath)
+                                                        prepare()
+                                                        start()
+                                                        setOnCompletionListener { playingTranscriptId = null }
+                                                    }
+                                                    playingTranscriptId = rec.id
+                                                }
+                                            }
+                                        },
+                                        modifier = Modifier.size(40.dp),
+                                    ) {
+                                        Icon(
+                                            if (isPlaying) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                                            contentDescription = if (isPlaying) "إيقاف" else "سماع المكالمة",
+                                        )
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = fmt.format(Date(rec.timestampMs)) +
+                                            if (rec.durationSec > 0) " • ${rec.durationSec} ثانية" else "",
+                                        style = MaterialTheme.typography.labelLarge,
+                                    )
+                                    val statusLabel = when (rec.status) {
+                                        "READY" -> "تم التفريغ والتحليل"
+                                        "PROCESSING" -> "جاري تفريغ الصوت بـ Gemini..."
+                                        "PENDING" -> "في انتظار التفريغ"
+                                        "ERROR" -> "تعذر التفريغ — أعد المحاولة"
+                                        else -> "مكالمة مسجلة باللوج"
+                                    }
+                                    Text(
+                                        text = statusLabel,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                if (audioFile != null && rec.status != "PROCESSING" && rec.status != "READY") {
+                                    FilledTonalButton(onClick = { onAnalyzeCallAudio(rec) }) {
+                                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("تفريغ")
+                                    }
+                                } else if (rec.status == "PROCESSING") {
+                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                }
+                            }
+
+                            if (rec.highlights.isNotEmpty()) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    rec.highlights.forEach { hl ->
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                        ) {
+                                            Text(
+                                                text = "★ $hl",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (rec.transcript.isNotBlank()) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = MaterialTheme.colorScheme.surfaceContainer,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(
+                                        text = rec.transcript,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        modifier = Modifier.padding(10.dp),
+                                    )
+                                }
+                            }
+
+                            if (rec.extractedNotes.isNotBlank() || rec.suggestedEventTitle.isNotBlank()) {
+                                Row(
+                                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (rec.extractedNotes.isNotBlank() && !rec.notesSavedToContact) {
+                                        OutlinedButton(onClick = { onSaveCallNotes(rec) }) {
+                                            Icon(Icons.Rounded.NoteAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("حفظ الملاحظات")
+                                        }
+                                    }
+                                    if (rec.suggestedEventTitle.isNotBlank()) {
+                                        FilledTonalButton(
+                                            onClick = {
+                                                SystemIntents.insertCalendarEvent(
+                                                    context = context,
+                                                    title = rec.suggestedEventTitle,
+                                                    description = "${rec.contactName} (${rec.phone})\n${rec.extractedNotes}",
+                                                    startEpochMs = rec.suggestedEventEpochMs,
+                                                )
+                                                onMarkCalendarAdded(rec.id)
+                                            },
+                                        ) {
+                                            Icon(Icons.Rounded.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(
+                                                if (rec.eventAddedToCalendar) "تم للتقويم: ${rec.suggestedEventTitle}"
+                                                else "إضافة للتقويم: ${rec.suggestedEventTitle}"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -845,8 +1155,11 @@ fun ContactEditorDialog(
     onDismiss: () -> Unit,
     onSave: (ContactRecord) -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var displayName by remember { mutableStateOf(initialContact?.displayName.orEmpty()) }
     var nickname by remember { mutableStateOf(initialContact?.nickname.orEmpty()) }
+    var photoUri by remember { mutableStateOf(initialContact?.photoUri) }
     var tagsText by remember { mutableStateOf(initialContact?.tags?.joinToString(", ").orEmpty()) }
     var phonesText by remember {
         mutableStateOf(
@@ -870,6 +1183,17 @@ fun ContactEditorDialog(
     var website by remember { mutableStateOf(initialContact?.website.orEmpty()) }
     var notes by remember { mutableStateOf(initialContact?.notes.orEmpty()) }
 
+    val photoPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val path = ContactPhotoStorage.savePickedPhoto(context, uri, initialContact?.id)
+                if (path != null) photoUri = path
+            }
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (initialContact?.id.isNullOrBlank()) "إضافة جهة اتصال" else "تعديل جهة الاتصال") },
@@ -881,6 +1205,46 @@ fun ContactEditorDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    val hasPhoto = !photoUri.isNullOrBlank() && File(photoUri!!).exists()
+                    Box(
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (hasPhoto) {
+                            AsyncImage(
+                                model = File(photoUri!!),
+                                contentDescription = displayName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Icon(Icons.Rounded.PhotoCamera, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        }
+                    }
+                    FilledTonalButton(
+                        onClick = {
+                            photoPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        },
+                        modifier = Modifier.testTag("editor_pick_photo_btn"),
+                    ) {
+                        Text(if (hasPhoto) "تغيير الصورة" else "إضافة صورة")
+                    }
+                    if (hasPhoto) {
+                        TextButton(onClick = { photoUri = null }) {
+                            Text("إزالة", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
                 OutlinedTextField(
                     value = displayName,
                     onValueChange = { displayName = it },
@@ -1008,6 +1372,7 @@ fun ContactEditorDialog(
                         (initialContact ?: ContactRecord()).copy(
                             displayName = finalName,
                             nickname = nickname.trim().ifBlank { null },
+                            photoUri = photoUri?.takeIf { it.isNotBlank() },
                             primaryPhone = phones.firstOrNull().orEmpty(),
                             phones = phones,
                             emails = emails,
@@ -1063,7 +1428,7 @@ fun WhatsAppCaptureDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "الصق الرقم أو رابط wa.me أو رسالة من واتساب، أو شارك البطاقة مباشرةً إلى تطبيق رابطة.",
+                    "الصق الرقم أو رابط wa.me أو رسالة من واتساب، أو شارك البطاقة مباشرةً إلى تطبيق Felo Contacts.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

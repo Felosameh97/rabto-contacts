@@ -31,7 +31,6 @@ import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import com.example.MainActivity
 import com.example.data.local.RabtaDatabase
-import com.example.domain.model.ContactRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -39,24 +38,50 @@ class RabtaWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget: GlanceAppWidget = RabtaWidget()
 }
 
+data class WidgetCallerSlot(
+    val title: String,
+    val phone: String,
+)
+
 class RabtaWidget : GlanceAppWidget() {
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
-        val quickContacts = withContext(Dispatchers.IO) {
-            val dao = RabtaDatabase.getInstance(context).contactDao()
-            val favs = dao.getFavoritesOnce(4).map { it.toDomain() }
-            if (favs.isNotEmpty()) favs else dao.getRecentOrAllPage(limit = 4, offset = 0).map { it.toDomain() }
+        val quickCallers = withContext(Dispatchers.IO) {
+            val db = RabtaDatabase.getInstance(context)
+            val recentDialed = db.dialHistoryDao().getActiveOnce(4)
+                .filter { it.phoneNumber.isNotBlank() }
+                .map {
+                    WidgetCallerSlot(
+                        title = it.matchedName ?: it.phoneNumber,
+                        phone = it.phoneNumber,
+                    )
+                }
+            if (recentDialed.isNotEmpty()) {
+                recentDialed
+            } else {
+                val dao = db.contactDao()
+                val favs = dao.getFavoritesOnce(4).ifEmpty {
+                    dao.getRecentOrAllPage(limit = 4, offset = 0)
+                }
+                favs.map { entity ->
+                    val phone = entity.primaryPhone
+                    WidgetCallerSlot(
+                        title = entity.displayName,
+                        phone = phone,
+                    )
+                }
+            }
         }
 
         provideContent {
             GlanceTheme {
-                WidgetContent(context = context, contacts = quickContacts)
+                WidgetContent(context = context, callers = quickCallers)
             }
         }
     }
 
     @Composable
-    private fun WidgetContent(context: Context, contacts: List<ContactRecord>) {
+    private fun WidgetContent(context: Context, callers: List<WidgetCallerSlot>) {
         val dialIntent = Intent(context, MainActivity::class.java).apply {
             action = ACTION_OPEN_DIALPAD
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -71,20 +96,23 @@ class RabtaWidget : GlanceAppWidget() {
                 .fillMaxSize()
                 .background(GlanceTheme.colors.surface)
                 .cornerRadius(20.dp)
-                .padding(12.dp),
+                .padding(12.dp)
+                .clickable(actionStartActivity(dialIntent)),
         ) {
             Row(
                 modifier = GlanceModifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "رابطة السريعة",
+                    text = "Felo Contacts • الكيباد",
                     style = TextStyle(
                         color = GlanceTheme.colors.onSurface,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
                     ),
-                    modifier = GlanceModifier.defaultWeight(),
+                    modifier = GlanceModifier
+                        .defaultWeight()
+                        .clickable(actionStartActivity(dialIntent)),
                 )
                 Row(
                     modifier = GlanceModifier
@@ -94,7 +122,7 @@ class RabtaWidget : GlanceAppWidget() {
                         .clickable(actionStartActivity(dialIntent)),
                 ) {
                     Text(
-                        text = "لوحة الاتصال",
+                        text = "فتح الكيباد",
                         style = TextStyle(
                             color = GlanceTheme.colors.onPrimaryContainer,
                             fontSize = 11.sp,
@@ -123,26 +151,36 @@ class RabtaWidget : GlanceAppWidget() {
 
             Spacer(GlanceModifier.height(10.dp))
 
-            if (contacts.isEmpty()) {
-                Text(
-                    text = "افتح رابطة لاستيراد جهات الاتصال وتثبيت المفضلة",
-                    style = TextStyle(
-                        color = GlanceTheme.colors.onSurfaceVariant,
-                        fontSize = 12.sp,
-                    ),
-                )
+            if (callers.isEmpty()) {
+                Row(
+                    modifier = GlanceModifier
+                        .fillMaxWidth()
+                        .background(GlanceTheme.colors.surfaceVariant)
+                        .cornerRadius(14.dp)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .clickable(actionStartActivity(dialIntent)),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "اضغط هنا لفتح الكيباد والاتصال الفوري من Felo Contacts",
+                        style = TextStyle(
+                            color = GlanceTheme.colors.onSurfaceVariant,
+                            fontSize = 12.sp,
+                        ),
+                    )
+                }
             } else {
                 Row(
                     modifier = GlanceModifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    contacts.take(4).forEachIndexed { idx, contact ->
+                    callers.take(4).forEachIndexed { idx, slot ->
                         if (idx > 0) Spacer(GlanceModifier.width(6.dp))
-                        val phone = contact.primaryPhone.ifBlank { contact.phones.firstOrNull().orEmpty() }
+                        val phone = slot.phone
                         val callIntent = if (phone.isNotBlank()) {
                             Intent(Intent.ACTION_DIAL, Uri.parse("tel:${Uri.encode(phone)}"))
                         } else {
-                            Intent(context, MainActivity::class.java)
+                            dialIntent
                         }
                         Column(
                             modifier = GlanceModifier
@@ -154,7 +192,7 @@ class RabtaWidget : GlanceAppWidget() {
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
                             Text(
-                                text = contact.displayName.take(10),
+                                text = slot.title.take(10),
                                 style = TextStyle(
                                     color = GlanceTheme.colors.onSurface,
                                     fontSize = 11.sp,

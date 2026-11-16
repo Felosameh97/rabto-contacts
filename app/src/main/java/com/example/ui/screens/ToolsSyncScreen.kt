@@ -26,6 +26,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Chat
@@ -35,13 +36,16 @@ import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DriveFolderUpload
 import androidx.compose.material.icons.rounded.FileOpen
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.SimCard
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.SystemUpdate
@@ -76,6 +80,7 @@ import androidx.core.content.ContextCompat
 import com.example.BuildConfig
 import com.example.R
 import com.example.data.remote.GoogleDriveScanner
+import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.GitHubReleaseInfo
 import com.example.domain.model.PaymentTemplate
@@ -86,6 +91,7 @@ import com.example.ui.components.AddPaymentTemplateDialog
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.SimPreference
 import com.example.util.SystemIntents
 import com.google.android.gms.auth.api.identity.Identity
 import kotlinx.coroutines.launch
@@ -107,10 +113,22 @@ fun ToolsSyncScreen(
     autoRecordCalls: Boolean,
     callRecordings: List<CallRecordingItem>,
     isBusy: Boolean,
+    showContactPhotos: Boolean = true,
+    callPhotoBackground: Boolean = true,
+    strictPhonebookIsolation: Boolean = true,
+    autoTranscribeCalls: Boolean = true,
+    simPreference: SimPreference = SimPreference.ASK_OR_BOTH,
+    callTranscripts: List<CallTranscriptRecord> = emptyList(),
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetCalmPalette: (CalmPalette) -> Unit,
     onSetAutoRecordCalls: (Boolean) -> Unit,
+    onSetShowContactPhotos: (Boolean) -> Unit = {},
+    onSetCallPhotoBackground: (Boolean) -> Unit = {},
+    onSetStrictPhonebookIsolation: (Boolean) -> Unit = {},
+    onSetAutoTranscribeCalls: (Boolean) -> Unit = {},
+    onSetSimPreference: (SimPreference) -> Unit = {},
     onDeleteRecording: (CallRecordingItem) -> Unit,
+    onTranscribeRecording: (CallRecordingItem) -> Unit = {},
     onImportBundledCsv: () -> Unit,
     onImportDevicePhonebook: () -> Unit,
     onScanGoogleDrive: (String) -> Unit,
@@ -121,6 +139,7 @@ fun ToolsSyncScreen(
     onOpenQrScanner: () -> Unit,
     onSyncWeeklyWhatsApp: () -> Unit,
     onRemoveFromPhonebook: (ContactRecord) -> Unit,
+    onPurgeAllFromPhonebook: () -> Unit = {},
     onAddPaymentTemplate: (String, String) -> Unit,
     onDeletePaymentTemplate: (String) -> Unit,
     onCheckGithubUpdates: (String) -> Unit,
@@ -169,6 +188,13 @@ fun ToolsSyncScreen(
     ) {
         onPermissionsChanged()
         onSyncWeeklyWhatsApp()
+    }
+
+    val purgeContactsPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        onPermissionsChanged()
+        onPurgeAllFromPhonebook()
     }
 
     val dialerRoleLauncher = rememberLauncherForActivityResult(
@@ -249,6 +275,120 @@ fun ToolsSyncScreen(
             }
         }
 
+        // Section 0.5: Photos, Privacy Isolation, Auto-Transcribe & SIM Preference
+        item {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Rounded.Image, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("الصور، الشرائح، والخصوصية الكاملة", style = MaterialTheme.typography.titleMedium)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("إظهار صور جهات الاتصال", style = MaterialTheme.typography.titleSmall)
+                            Text("عرض الصورة الدائرية لكل شخص في الكروت والبحث.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = showContactPhotos,
+                            onCheckedChange = onSetShowContactPhotos,
+                            modifier = Modifier.testTag("settings_show_photos_switch"),
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("صورة المتصل كخلفية لشاشة المكالمة", style = MaterialTheme.typography.titleSmall)
+                            Text("عرض صورة الشخص كاملة خلفياً عند الاتصال أو الاستقبال.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = callPhotoBackground,
+                            onCheckedChange = onSetCallPhotoBackground,
+                            modifier = Modifier.testTag("settings_call_bg_photo_switch"),
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("تفريغ وتنظيم المكالمات تلقائياً بـ Gemini", style = MaterialTheme.typography.titleSmall)
+                            Text("بعد المكالمة المسجلة يتم استخراج النص والهايلايتس والمواعيد للتقويم والملاحظات.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = autoTranscribeCalls,
+                            onCheckedChange = onSetAutoTranscribeCalls,
+                            modifier = Modifier.testTag("settings_auto_transcribe_switch"),
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("فصل كامل عن سجل الموبايل وواتساب", style = MaterialTheme.typography.titleSmall)
+                            Text("يمنع نزول أي رقم إلى Contacts الهاتف حتى لا يظهر بأسمائه على واتساب.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = strictPhonebookIsolation,
+                            onCheckedChange = onSetStrictPhonebookIsolation,
+                            modifier = Modifier.testTag("settings_strict_isolation_switch"),
+                        )
+                    }
+
+                    if (syncedDeviceContacts.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = {
+                                purgeContactsPermLauncher.launch(
+                                    arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
+                                )
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.fillMaxWidth().testTag("tools_purge_phonebook_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("فصل وإزالة (${syncedDeviceContacts.size}) رقم متزامن من سجل الموبايل")
+                        }
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Rounded.SimCard, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Text("اختيار الشريحة (SIM)", style = MaterialTheme.typography.titleSmall)
+                    }
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        SimPreference.entries.forEach { pref ->
+                            FilterChip(
+                                selected = simPreference == pref,
+                                onClick = { onSetSimPreference(pref) },
+                                label = { Text(pref.labelAr) },
+                                modifier = Modifier.testTag("settings_sim_${pref.name}"),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Section 1: Phone Dialer Replacement & Call Recording
         item {
             Card(
@@ -263,9 +403,9 @@ fun ToolsSyncScreen(
                     }
                     Text(
                         if (isDefaultDialer) {
-                            "رابطة هو تطبيق الهاتف الافتراضي حالياً — يعرض هوية المتصل من الـ 20,000+ رقم ويدعم التسجيل المحلي."
+                            "Felo Contacts هو تطبيق الهاتف الافتراضي حالياً — يعرض هوية المتصل وصورته مع التسجيل والتفريغ التلقائي."
                         } else {
-                            "اجعل رابطة تطبيق الهاتف الافتراضي للاستغناء عن تطبيق الاتصال الأساسي وعرض شاشة المكالمات مع التسجيل."
+                            "اجعل Felo Contacts تطبيق الهاتف الافتراضي للاستغناء عن تطبيق الاتصال الأساسي وعرض شاشة المكالمات مع التسجيل."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -282,7 +422,7 @@ fun ToolsSyncScreen(
                         ) {
                             Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("تعيين رابطة كتطبيق الاتصال الافتراضي")
+                            Text("تعيين Felo Contacts كتطبيق الاتصال الافتراضي")
                         }
                     }
                     Row(
@@ -324,62 +464,74 @@ fun ToolsSyncScreen(
             }
             items(callRecordings.take(12), key = { it.file.absolutePath }) { rec ->
                 val isPlaying = playingPath == rec.file.absolutePath
+                val matchedTranscript = callTranscripts.firstOrNull { it.audioFilePath == rec.file.absolutePath }
                 val fmt = SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        IconButton(
-                            onClick = {
-                                if (isPlaying) {
-                                    runCatching {
-                                        mediaPlayer?.stop()
-                                        mediaPlayer?.release()
-                                    }
-                                    mediaPlayer = null
-                                    playingPath = null
-                                } else {
-                                    runCatching {
-                                        mediaPlayer?.stop()
-                                        mediaPlayer?.release()
-                                        mediaPlayer = MediaPlayer().apply {
-                                            setDataSource(rec.file.absolutePath)
-                                            prepare()
-                                            start()
-                                            setOnCompletionListener {
-                                                playingPath = null
-                                            }
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    if (isPlaying) {
+                                        runCatching {
+                                            mediaPlayer?.stop()
+                                            mediaPlayer?.release()
                                         }
-                                        playingPath = rec.file.absolutePath
+                                        mediaPlayer = null
+                                        playingPath = null
+                                    } else {
+                                        runCatching {
+                                            mediaPlayer?.stop()
+                                            mediaPlayer?.release()
+                                            mediaPlayer = MediaPlayer().apply {
+                                                setDataSource(rec.file.absolutePath)
+                                                prepare()
+                                                start()
+                                                setOnCompletionListener {
+                                                    playingPath = null
+                                                }
+                                            }
+                                            playingPath = rec.file.absolutePath
+                                        }
                                     }
                                 }
+                            ) {
+                                Icon(
+                                    if (isPlaying) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
+                                    contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
                             }
-                        ) {
-                            Icon(
-                                if (isPlaying) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
-                                contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
-                                tint = MaterialTheme.colorScheme.primary,
-                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(rec.displayName, style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "${fmt.format(Date(rec.timestampMs))} • ${rec.sizeKb} KB",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            IconButton(onClick = { onTranscribeRecording(rec) }) {
+                                Icon(Icons.Rounded.AutoAwesome, contentDescription = "تفريغ بـ Gemini", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                            }
+                            IconButton(onClick = { SystemIntents.shareBinaryFile(context, rec.file, "audio/mp4") }) {
+                                Icon(Icons.Rounded.Share, contentDescription = "مشاركة", modifier = Modifier.size(18.dp))
+                            }
+                            IconButton(onClick = { onDeleteRecording(rec) }) {
+                                Icon(Icons.Rounded.Delete, contentDescription = "حذف", modifier = Modifier.size(18.dp))
+                            }
                         }
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(rec.displayName, style = MaterialTheme.typography.titleSmall)
+                        if (matchedTranscript != null && matchedTranscript.transcript.isNotBlank()) {
                             Text(
-                                "${fmt.format(Date(rec.timestampMs))} • ${rec.sizeKb} KB",
+                                text = matchedTranscript.transcript,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
-                        }
-                        IconButton(onClick = { SystemIntents.shareBinaryFile(context, rec.file, "audio/mp4") }) {
-                            Icon(Icons.Rounded.Share, contentDescription = "مشاركة", modifier = Modifier.size(18.dp))
-                        }
-                        IconButton(onClick = { onDeleteRecording(rec) }) {
-                            Icon(Icons.Rounded.Delete, contentDescription = "حذف", modifier = Modifier.size(18.dp))
                         }
                     }
                 }
@@ -526,35 +678,37 @@ fun ToolsSyncScreen(
             }
         }
 
-        // Section 3: 7-Day WhatsApp Logger & Selective Phonebook Sync
-        item {
-            Card(
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen)
-                        Text("سجل واتساب الأسبوعي والمزامنة الانتقائية", style = MaterialTheme.typography.titleMedium)
-                    }
-                    Text(
-                        "كل مرة تفتح فيها واتساب من التطبيق يتم تسجيل اليوم والساعة، ويمكنك حفظ هؤلاء الأشخاص فقط في سجل هاتفك ليتعرف عليهم واتساب.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Button(
-                        onClick = {
-                            contactsSyncPermLauncher.launch(
-                                arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
-                            )
-                        },
-                        enabled = !isBusy,
-                        modifier = Modifier.fillMaxWidth().testTag("tools_sync_weekly_wa_btn"),
-                    ) {
-                        Icon(Icons.Rounded.Sync, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("مزامنة نشطي آخر 7 أيام للهاتف")
+        // Section 3: 7-Day WhatsApp Logger & Selective Phonebook Sync (Respects strict isolation)
+        if (!strictPhonebookIsolation) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen)
+                            Text("سجل واتساب الأسبوعي والمزامنة الانتقائية", style = MaterialTheme.typography.titleMedium)
+                        }
+                        Text(
+                            "كل مرة تفتح فيها واتساب من التطبيق يتم تسجيل اليوم والساعة، ويمكنك حفظ هؤلاء الأشخاص فقط في سجل هاتفك ليتعرف عليهم واتساب.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = {
+                                contactsSyncPermLauncher.launch(
+                                    arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
+                                )
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.fillMaxWidth().testTag("tools_sync_weekly_wa_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Sync, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("مزامنة نشطي آخر 7 أيام للهاتف")
+                        }
                     }
                 }
             }

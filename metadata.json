@@ -1,6 +1,6 @@
 {
-  "name": "Rabta Contacts",
-  "description": "High-capacity smart contacts, dialer, nested categories, WhatsApp tracker, payment links, and map directory for 20,000+ contacts.",
+  "name": "Felo Contacts",
+  "description": "Smart contacts manager, dual-SIM dialer, AI call transcription & calendar organizer, nested categories, payment links, and map directory.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

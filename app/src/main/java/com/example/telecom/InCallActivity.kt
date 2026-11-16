@@ -52,17 +52,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
 import com.example.data.local.SyncPrefsDataStore
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.RabtaContactsTheme
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.WhatsAppGreen
+import java.io.File
 
 class InCallActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,16 +77,23 @@ class InCallActivity : ComponentActivity() {
             val prefs = remember { SyncPrefsDataStore(applicationContext) }
             val themeMode by prefs.themeModeFlow.collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
             val palette by prefs.paletteFlow.collectAsStateWithLifecycle(initialValue = CalmPalette.SLATE)
+            val usePhotoBackground by prefs.callPhotoBackgroundFlow.collectAsStateWithLifecycle(initialValue = true)
 
             RabtaContactsTheme(themeMode = themeMode, palette = palette) {
-                InCallScreen(onFinish = { finish() })
+                InCallScreen(
+                    usePhotoBackground = usePhotoBackground,
+                    onFinish = { finish() },
+                )
             }
         }
     }
 }
 
 @Composable
-private fun InCallScreen(onFinish: () -> Unit) {
+private fun InCallScreen(
+    usePhotoBackground: Boolean,
+    onFinish: () -> Unit,
+) {
     val context = LocalContext.current
     val state by RabtaInCallService.uiState.collectAsStateWithLifecycle()
     var showKeypad by remember { mutableStateOf(false) }
@@ -99,6 +111,8 @@ private fun InCallScreen(onFinish: () -> Unit) {
     }
 
     val displayName = state.matchedContact?.displayName?.ifBlank { state.phoneNumber } ?: state.phoneNumber.ifBlank { "مكالمة" }
+    val photoPath = state.matchedContact?.photoUri?.takeIf { it.isNotBlank() && File(it).exists() }
+    val showBgPhoto = usePhotoBackground && photoPath != null
     val statusText = when (state.callState) {
         Call.STATE_RINGING -> "مكالمة واردة..."
         Call.STATE_DIALING, Call.STATE_CONNECTING -> "جاري الاتصال..."
@@ -107,186 +121,226 @@ private fun InCallScreen(onFinish: () -> Unit) {
         else -> "إنهاء المكالمة"
     }
 
+    val primaryTextColor = if (showBgPhoto) Color.White else MaterialTheme.colorScheme.onSurface
+    val secondaryTextColor = if (showBgPhoto) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
+
     Scaffold { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween,
-        ) {
-            // Caller ID Card from 20k+ Room database
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.padding(top = 24.dp),
-            ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (showBgPhoto && photoPath != null) {
+                AsyncImage(
+                    model = File(photoPath),
+                    contentDescription = displayName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
                 Box(
                     modifier = Modifier
-                        .size(88.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = displayName.firstOrNull()?.uppercase() ?: "#",
-                        style = MaterialTheme.typography.headlineLarge,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-
-                Text(
-                    text = displayName,
-                    style = MaterialTheme.typography.headlineMedium,
-                    textAlign = TextAlign.Center,
-                )
-                if (state.phoneNumber.isNotBlank() && state.phoneNumber != displayName) {
-                    Text(
-                        text = state.phoneNumber,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Text(
-                    text = statusText,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-
-                val categoryOrDistrict = listOfNotNull(
-                    state.matchedContact?.categoryPaths?.firstOrNull(),
-                    state.matchedContact?.district,
-                ).joinToString(" • ")
-                if (categoryOrDistrict.isNotBlank()) {
-                    AssistChip(onClick = {}, label = { Text(categoryOrDistrict) })
-                }
-
-                state.recordingStatusNote?.let { note ->
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (state.isRecording) ErrorRed.copy(alpha = 0.14f) else MaterialTheme.colorScheme.surfaceContainerLow,
-                    ) {
-                        Text(
-                            text = note,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (state.isRecording) ErrorRed else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color.Black.copy(alpha = 0.58f),
+                                    Color.Black.copy(alpha = 0.42f),
+                                    Color.Black.copy(alpha = 0.84f),
+                                )
+                            )
                         )
-                    }
-                }
+                )
             }
 
-            if (showKeypad) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val rows = listOf(
-                        listOf('1', '2', '3'),
-                        listOf('4', '5', '6'),
-                        listOf('7', '8', '9'),
-                        listOf('*', '0', '#'),
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(top = 24.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(92.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (photoPath != null) {
+                            AsyncImage(
+                                model = File(photoPath),
+                                contentDescription = displayName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        } else {
+                            Text(
+                                text = displayName.firstOrNull()?.uppercase() ?: "#",
+                                style = MaterialTheme.typography.headlineLarge,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = displayName,
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = primaryTextColor,
+                        textAlign = TextAlign.Center,
                     )
-                    rows.forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            row.forEach { ch ->
-                                FilledTonalIconButton(
-                                    onClick = { RabtaInCallService.sendDtmf(ch) },
-                                    modifier = Modifier.size(60.dp),
-                                ) {
-                                    Text(ch.toString(), style = MaterialTheme.typography.titleLarge)
+                    if (state.phoneNumber.isNotBlank() && state.phoneNumber != displayName) {
+                        Text(
+                            text = state.phoneNumber,
+                            style = MaterialTheme.typography.titleMedium,
+                            color = secondaryTextColor,
+                        )
+                    }
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = if (showBgPhoto) Color.White else MaterialTheme.colorScheme.primary,
+                    )
+
+                    val categoryOrDistrict = listOfNotNull(
+                        state.matchedContact?.categoryPaths?.firstOrNull(),
+                        state.matchedContact?.district,
+                    ).joinToString(" • ")
+                    if (categoryOrDistrict.isNotBlank()) {
+                        AssistChip(onClick = {}, label = { Text(categoryOrDistrict) })
+                    }
+
+                    state.recordingStatusNote?.let { note ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (state.isRecording) ErrorRed.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceContainerLow,
+                        ) {
+                            Text(
+                                text = note,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (state.isRecording) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+
+                if (showKeypad) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val rows = listOf(
+                            listOf('1', '2', '3'),
+                            listOf('4', '5', '6'),
+                            listOf('7', '8', '9'),
+                            listOf('*', '0', '#'),
+                        )
+                        rows.forEach { row ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                row.forEach { ch ->
+                                    FilledTonalIconButton(
+                                        onClick = { RabtaInCallService.sendDtmf(ch) },
+                                        modifier = Modifier.size(60.dp),
+                                    ) {
+                                        Text(ch.toString(), style = MaterialTheme.typography.titleLarge)
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            // Call Controls
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                 ) {
-                    CallActionToggle(
-                        icon = if (state.isMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
-                        label = if (state.isMuted) "صامت" else "الميكروفون",
-                        active = state.isMuted,
-                        onClick = { RabtaInCallService.toggleMute() },
-                    )
-                    CallActionToggle(
-                        icon = Icons.Rounded.VolumeUp,
-                        label = "سبيكر",
-                        active = state.isSpeaker,
-                        onClick = { RabtaInCallService.toggleSpeaker() },
-                    )
-                    CallActionToggle(
-                        icon = if (state.isOnHold) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
-                        label = if (state.isOnHold) "استئناف" else "انتظار",
-                        active = state.isOnHold,
-                        onClick = { RabtaInCallService.toggleHold() },
-                    )
-                    CallActionToggle(
-                        icon = Icons.Rounded.Dialpad,
-                        label = "لوحة",
-                        active = showKeypad,
-                        onClick = { showKeypad = !showKeypad },
-                    )
-                    CallActionToggle(
-                        icon = if (state.isRecording) Icons.Rounded.Stop else Icons.Rounded.FiberManualRecord,
-                        label = if (state.isRecording) "إيقاف التسجيل" else "تسجيل",
-                        active = state.isRecording,
-                        activeColor = ErrorRed,
-                        onClick = {
-                            if (CallRecorderManager.hasRecordPermission(context)) {
-                                RabtaInCallService.toggleRecording()
-                            } else {
-                                recordPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            }
-                        },
-                    )
-                }
-
-                if (state.callState == Call.STATE_RINGING) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceEvenly,
                     ) {
+                        CallActionToggle(
+                            icon = if (state.isMuted) Icons.Rounded.MicOff else Icons.Rounded.Mic,
+                            label = if (state.isMuted) "صامت" else "الميكروفون",
+                            active = state.isMuted,
+                            labelColor = primaryTextColor,
+                            onClick = { RabtaInCallService.toggleMute() },
+                        )
+                        CallActionToggle(
+                            icon = Icons.Rounded.VolumeUp,
+                            label = "سبيكر",
+                            active = state.isSpeaker,
+                            labelColor = primaryTextColor,
+                            onClick = { RabtaInCallService.toggleSpeaker() },
+                        )
+                        CallActionToggle(
+                            icon = if (state.isOnHold) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
+                            label = if (state.isOnHold) "استئناف" else "انتظار",
+                            active = state.isOnHold,
+                            labelColor = primaryTextColor,
+                            onClick = { RabtaInCallService.toggleHold() },
+                        )
+                        CallActionToggle(
+                            icon = Icons.Rounded.Dialpad,
+                            label = "لوحة",
+                            active = showKeypad,
+                            labelColor = primaryTextColor,
+                            onClick = { showKeypad = !showKeypad },
+                        )
+                        CallActionToggle(
+                            icon = if (state.isRecording) Icons.Rounded.Stop else Icons.Rounded.FiberManualRecord,
+                            label = if (state.isRecording) "إيقاف التسجيل" else "تسجيل",
+                            active = state.isRecording,
+                            activeColor = ErrorRed,
+                            labelColor = primaryTextColor,
+                            onClick = {
+                                if (CallRecorderManager.hasRecordPermission(context)) {
+                                    RabtaInCallService.toggleRecording()
+                                } else {
+                                    recordPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                        )
+                    }
+
+                    if (state.callState == Call.STATE_RINGING) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                        ) {
+                            Button(
+                                onClick = { RabtaInCallService.endCall() },
+                                colors = ButtonDefaults.buttonColors(containerColor = ErrorRed),
+                                shape = RoundedCornerShape(28.dp),
+                                modifier = Modifier.height(58.dp).weight(1f),
+                            ) {
+                                Icon(Icons.Rounded.CallEnd, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("رفض")
+                            }
+                            Spacer(Modifier.width(16.dp))
+                            Button(
+                                onClick = { RabtaInCallService.answerCall() },
+                                colors = ButtonDefaults.buttonColors(containerColor = WhatsAppGreen),
+                                shape = RoundedCornerShape(28.dp),
+                                modifier = Modifier.height(58.dp).weight(1f),
+                            ) {
+                                Icon(Icons.Rounded.Call, contentDescription = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("رد")
+                            }
+                        }
+                    } else {
                         Button(
                             onClick = { RabtaInCallService.endCall() },
                             colors = ButtonDefaults.buttonColors(containerColor = ErrorRed),
-                            shape = RoundedCornerShape(28.dp),
-                            modifier = Modifier.height(58.dp).weight(1f),
+                            shape = RoundedCornerShape(32.dp),
+                            modifier = Modifier.height(60.dp).fillMaxWidth(0.65f),
                         ) {
                             Icon(Icons.Rounded.CallEnd, contentDescription = null)
                             Spacer(Modifier.width(8.dp))
-                            Text("رفض")
+                            Text("إنهاء المكالمة")
                         }
-                        Spacer(Modifier.width(16.dp))
-                        Button(
-                            onClick = { RabtaInCallService.answerCall() },
-                            colors = ButtonDefaults.buttonColors(containerColor = WhatsAppGreen),
-                            shape = RoundedCornerShape(28.dp),
-                            modifier = Modifier.height(58.dp).weight(1f),
-                        ) {
-                            Icon(Icons.Rounded.Call, contentDescription = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("رد")
-                        }
-                    }
-                } else {
-                    Button(
-                        onClick = { RabtaInCallService.endCall() },
-                        colors = ButtonDefaults.buttonColors(containerColor = ErrorRed),
-                        shape = RoundedCornerShape(32.dp),
-                        modifier = Modifier.height(60.dp).fillMaxWidth(0.65f),
-                    ) {
-                        Icon(Icons.Rounded.CallEnd, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("إنهاء المكالمة")
                     }
                 }
             }
@@ -299,7 +353,8 @@ private fun CallActionToggle(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     active: Boolean,
-    activeColor: androidx.compose.ui.graphics.Color? = null,
+    activeColor: Color? = null,
+    labelColor: Color = MaterialTheme.colorScheme.onSurface,
     onClick: () -> Unit,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -307,7 +362,7 @@ private fun CallActionToggle(
             onClick = onClick,
             colors = if (active) {
                 IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = (activeColor ?: MaterialTheme.colorScheme.primary).copy(alpha = 0.2f),
+                    containerColor = (activeColor ?: MaterialTheme.colorScheme.primary).copy(alpha = 0.28f),
                     contentColor = activeColor ?: MaterialTheme.colorScheme.primary,
                 )
             } else {
@@ -317,6 +372,6 @@ private fun CallActionToggle(
         ) {
             Icon(icon, contentDescription = label)
         }
-        Text(label, style = MaterialTheme.typography.labelSmall)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = labelColor)
     }
 }

@@ -7,6 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.CalendarContract
+import android.telecom.PhoneAccountHandle
+import android.telecom.TelecomManager
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -35,14 +38,45 @@ object SystemIntents {
 
     /**
      * Places a call directly via ACTION_CALL if CALL_PHONE is granted, otherwise opens dialer.
+     * Supports selecting SIM 1 / SIM 2 via optional PhoneAccountHandle.
      */
-    fun dialPhone(context: Context, phone: String) {
+    fun dialPhone(context: Context, phone: String, accountHandle: PhoneAccountHandle? = null) {
         if (phone.isBlank()) return
         val encoded = Uri.encode(phone)
         val hasCallPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         val action = if (hasCallPerm) Intent.ACTION_CALL else Intent.ACTION_DIAL
-        val intent = Intent(action, Uri.parse("tel:$encoded"))
+        val intent = Intent(action, Uri.parse("tel:$encoded")).apply {
+            if (accountHandle != null && action == Intent.ACTION_CALL) {
+                putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, accountHandle)
+            }
+        }
         launchSafe(context, intent, "تعذر بدء المكالمة")
+    }
+
+    fun dialPhoneWithSimSlot(context: Context, phone: String, simSlotIndex: Int?) {
+        if (phone.isBlank()) return
+        val handle = if (simSlotIndex != null) {
+            SimUtils.getAvailableSims(context).firstOrNull { it.slotIndex == simSlotIndex }?.accountHandle
+        } else null
+        dialPhone(context, phone, handle)
+    }
+
+    fun insertCalendarEvent(
+        context: Context,
+        title: String,
+        description: String,
+        startEpochMs: Long? = null,
+    ) {
+        if (title.isBlank()) return
+        val start = startEpochMs ?: (System.currentTimeMillis() + 24L * 60L * 60L * 1000L)
+        val intent = Intent(Intent.ACTION_INSERT).apply {
+            data = CalendarContract.Events.CONTENT_URI
+            putExtra(CalendarContract.Events.TITLE, title)
+            putExtra(CalendarContract.Events.DESCRIPTION, description)
+            putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
+            putExtra(CalendarContract.EXTRA_EVENT_END_TIME, start + 60L * 60L * 1000L)
+        }
+        launchSafe(context, intent, "لا يوجد تطبيق تقويم متاح")
     }
 
     fun openWhatsApp(context: Context, phone: String, prefillMessage: String? = null) {

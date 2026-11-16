@@ -20,5 +20,31 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
--keep class * implements androidx.glance.appwidget.action.ActionCallback { public <init>(); }
+-dontobfuscate
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,SourceFile,LineNumberTable
 
+-keep class com.example.domain.model.** { *; }
+-keep class com.example.data.remote.** { *; }
+-keep class com.example.data.local.** { *; }
+-keep class com.example.ui.navigation.** { *; }
+-keep class com.example.telecom.** { *; }
+-keep class com.example.widget.** { *; }
+-keep class * implements androidx.glance.appwidget.action.ActionCallback { public <init>(); }
+-keep,includedescriptorclasses class **$$serializer { *; }
+-keepclassmembers class * {
+    @com.squareup.moshi.Json <fields>;
+    @com.google.firebase.firestore.PropertyName <fields>;
+    @com.google.firebase.firestore.DocumentId <fields>;
+    @com.google.firebase.firestore.ServerTimestamp <fields>;
+}
+
+-dontwarn org.osmdroid.**
+-dontwarn retrofit2.**
+-dontwarn okhttp3.**
+-dontwarn com.google.**
+-dontwarn javax.annotation.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+-dontwarn io.grpc.**
+-dontwarn kotlinx.serialization.**

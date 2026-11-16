@@ -5,11 +5,18 @@ import com.example.domain.model.ContactRecord
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private const val TAG = "RabtaAiAssistant"
 
@@ -119,7 +126,7 @@ class RabtaAiAssistant {
     suspend fun parseCommand(userText: String, availableTopCategories: List<String>): Result<AiCommandPlan> {
         return try {
             val prompt = buildString {
-                appendLine("أنت المساعد الذكي لتطبيق إدارة جهات الاتصال والاتصال 'رابطة' (Rabta Contacts) في مصر.")
+                appendLine("أنت المساعد الذكي لتطبيق إدارة جهات الاتصال والمكالمات 'Felo Contacts' في مصر.")
                 appendLine("المستخدم أصدر الأمر التالي باللغة العربية أو الإنجليزية:")
                 appendLine("\"$userText\"")
                 appendLine()
@@ -329,6 +336,127 @@ class RabtaAiAssistant {
         } catch (e: Exception) {
             Log.e(TAG, "Gemini classify failed", e)
             Result.failure(e)
+        }
+    }
+
+    data class CallAnalysisResult(
+        val transcript: String,
+        val highlights: List<String>,
+        val extractedNotes: String,
+        val eventTitle: String,
+        val eventDateIso: String,
+        val eventEpochMs: Long?,
+        val suggestedCategory: String,
+    )
+
+    private val callAnalysisSchema = Schema.obj(
+        properties = mapOf(
+            "transcript" to Schema.string(description = "Full accurate transcription of the phone call in the original spoken language (Arabic/English)"),
+            "highlights" to Schema.array(
+                items = Schema.string(),
+                description = "2 to 5 concise bullet highlights (commitments, amounts, locations, important details)",
+            ),
+            "extractedNotes" to Schema.string(description = "Organized summary note to append to the contact record"),
+            "eventTitle" to Schema.string(description = "Short calendar event title if an appointment/meeting/reminder was mentioned, otherwise empty string"),
+            "eventDateIso" to Schema.string(description = "Local date-time in 'yyyy-MM-dd HH:mm' format relative to current timestamp if an event was mentioned, otherwise empty string"),
+            "suggestedCategory" to Schema.string(description = "Optional nested Arabic category suggestion using ' > '"),
+        ),
+        optionalProperties = listOf("eventTitle", "eventDateIso", "suggestedCategory"),
+    )
+
+    private val callAnalysisModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = callAnalysisSchema
+                temperature = 0.2f
+            },
+        )
+    }
+
+    suspend fun analyzeCallRecording(
+        audioFile: File,
+        contactName: String,
+        phone: String,
+    ): Result<CallAnalysisResult> {
+        return try {
+            if (!audioFile.exists() || audioFile.length() < 512L) {
+                return Result.failure(IllegalStateException("ملف التسجيل الصوتي غير موجود أو فارغ"))
+            }
+            if (audioFile.length() > 18L * 1024L * 1024L) {
+                return Result.failure(IllegalStateException("حجم التسجيل أكبر من حد 18 ميجا للتحليل الفوري"))
+            }
+            val bytes = withContext(Dispatchers.IO) { audioFile.readBytes() }
+            val nowIso = SimpleDateFormat("yyyy-MM-dd HH:mm (EEEE)", Locale.US).format(Date())
+
+            val prompt = content {
+                inlineData(bytes, "audio/mp4")
+                text(
+                    buildString {
+                        appendLine("قم بتفريغ (Transcribe) هذه المكالمة الهاتفية بالكامل بدقة باللغة الأصلية (مصري/عربي أو إنجليزي).")
+                        appendLine("بيانات المتصل: $contactName ($phone)")
+                        appendLine("التاريخ والوقت الحالي المرجعي: $nowIso")
+                        appendLine()
+                        appendLine("المطلوب إرجاع JSON منظم يشمل:")
+                        appendLine("1) transcript: النص الكامل للمكالمة.")
+                        appendLine("2) highlights: أهم النقاط والمواعيد والأرقام والالتزامات (2-5 جمل قصيرة).")
+                        appendLine("3) extractedNotes: ملاحظات منظمة ومختصرة لحفظها داخل ملف جهة الاتصال.")
+                        appendLine("4) eventTitle و eventDateIso: إذا ذُكر موعد أو تذكير (مثلاً 'بكرة عندنا كذا' أو 'يوم الخميس الساعة 5')، استخرج عنوان الحدث وتاريخه بصيغة yyyy-MM-dd HH:mm، وإلا اتركهما فارغين.")
+                        appendLine("5) suggestedCategory: اقتراح تصنيف مناسب لجهة الاتصال إن وضح من المكالمة.")
+                    }
+                )
+            }
+
+            val response = withTimeout(60_000L) {
+                callAnalysisModel.generateContent(prompt)
+            }
+            val jsonString = response.text
+                ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً أثناء تحليل المكالمة"))
+            val json = JSONObject(jsonString)
+            val highlightsArr = json.optJSONArray("highlights")
+            val highlights = buildList {
+                if (highlightsArr != null) {
+                    for (i in 0 until highlightsArr.length()) {
+                        val h = highlightsArr.optString(i).trim()
+                        if (h.isNotBlank()) add(h)
+                    }
+                }
+            }
+            val eventDateIso = json.optString("eventDateIso", "").trim()
+            Result.success(
+                CallAnalysisResult(
+                    transcript = json.optString("transcript", "").trim(),
+                    highlights = highlights,
+                    extractedNotes = json.optString("extractedNotes", "").trim(),
+                    eventTitle = json.optString("eventTitle", "").trim(),
+                    eventDateIso = eventDateIso,
+                    eventEpochMs = parseIsoDateToEpochMs(eventDateIso),
+                    suggestedCategory = json.optString("suggestedCategory", "").trim(),
+                )
+            )
+        } catch (e: TimeoutCancellationException) {
+            Log.e(TAG, "Gemini audio transcription timed out", e)
+            Result.failure(IllegalStateException("انتهت مهلة تفريغ المكالمة (60 ثانية)."))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Gemini audio transcription failed", e)
+            Result.failure(e)
+        }
+    }
+
+    companion object {
+        fun parseIsoDateToEpochMs(iso: String): Long? {
+            if (iso.isBlank()) return null
+            val patterns = listOf("yyyy-MM-dd HH:mm", "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd")
+            for (p in patterns) {
+                val parsed = runCatching {
+                    SimpleDateFormat(p, Locale.US).parse(iso.take(p.length.coerceAtMost(iso.length)))
+                }.getOrNull()
+                if (parsed != null) return parsed.time
+            }
+            return null
         }
     }
 }

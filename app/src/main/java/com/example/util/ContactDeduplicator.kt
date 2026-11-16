@@ -1,10 +1,34 @@
 package com.example.util
 
 import com.example.domain.model.ContactRecord
+import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 
 object ContactDeduplicator {
+
+    fun deterministicContactId(
+        phones: List<String>,
+        emails: List<String>,
+        fallbackName: String = "",
+    ): String {
+        val phoneKey = phones.asSequence()
+            .map { PhoneUtils.phoneSearchKey(it) }
+            .firstOrNull { it.length >= 7 }
+        if (!phoneKey.isNullOrBlank()) {
+            return "c_ph_$phoneKey"
+        }
+        val emailKey = emails.asSequence()
+            .map { it.trim().lowercase(Locale.ROOT) }
+            .firstOrNull { it.contains("@") }
+        val seed = emailKey ?: fallbackName.trim().lowercase(Locale.ROOT)
+        if (seed.isBlank()) {
+            return "c_" + UUID.randomUUID().toString().replace("-", "").take(16)
+        }
+        val bytes = MessageDigest.getInstance("SHA-256").digest(seed.toByteArray())
+        val hex = bytes.joinToString("") { "%02x".format(it) }.take(16)
+        return "c_h_$hex"
+    }
 
     data class DeduplicationResult(
         val mergedContacts: List<ContactRecord>,
@@ -79,7 +103,7 @@ object ContactDeduplicator {
         )
 
         return record.copy(
-            id = record.id.ifBlank { "c_" + UUID.randomUUID().toString().replace("-", "").take(16) },
+            id = record.id.ifBlank { deterministicContactId(normPhones, normEmails, finalName) },
             displayName = finalName.ifBlank { normPhones.firstOrNull().orEmpty() }.ifBlank { normEmails.firstOrNull().orEmpty() },
             nickname = finalNickname,
             primaryPhone = normPhones.firstOrNull().orEmpty(),
@@ -215,6 +239,7 @@ object ContactDeduplicator {
         var bestLng: Double? = null
         var bestTelegram: String? = null
         var bestWebsite: String? = null
+        var bestPhotoUri: String? = null
         var anySynced = false
         var anyFavorite = false
 
@@ -265,6 +290,9 @@ object ContactDeduplicator {
             }
             if (bestWebsite.isNullOrBlank()) {
                 item.website?.takeIf { it.isNotBlank() }?.let { bestWebsite = it }
+            }
+            if (bestPhotoUri.isNullOrBlank()) {
+                item.photoUri?.takeIf { it.isNotBlank() }?.let { bestPhotoUri = it }
             }
             if (item.syncedToDevice) anySynced = true
             if (item.isFavorite) anyFavorite = true
@@ -331,6 +359,7 @@ object ContactDeduplicator {
             longitude = bestLng ?: geo?.lng,
             telegramHandle = bestTelegram,
             website = bestWebsite,
+            photoUri = bestPhotoUri,
             syncedToDevice = anySynced,
             isFavorite = anyFavorite || starredFromCat,
             createdAt = anchor.createdAt,
@@ -345,6 +374,7 @@ object ContactDeduplicator {
         score += c.emails.size * 20
         score += c.categoryPaths.size * 15
         score += c.tags.size * 10
+        if (!c.photoUri.isNullOrBlank()) score += 30
         if (!c.organization.isNullOrBlank()) score += 20
         if (!c.address.isNullOrBlank()) score += 20
         if (!c.notes.isNullOrBlank()) score += 15

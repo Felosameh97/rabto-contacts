@@ -3,8 +3,10 @@ package com.example.data.local
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.CategoryNode
 import com.example.domain.model.ContactRecord
+import com.example.domain.model.DialHistoryEntry
 import com.example.domain.model.PaymentTemplate
 import com.example.domain.model.WhatsAppLog
 
@@ -37,6 +39,7 @@ data class ContactEntity(
     val longitude: Double?,
     val telegramHandle: String?,
     val website: String?,
+    val photoUri: String? = null,
     val syncedToDevice: Boolean,
     val isFavorite: Boolean,
     val searchBlob: String,
@@ -61,6 +64,7 @@ data class ContactEntity(
         longitude = longitude,
         telegramHandle = telegramHandle,
         website = website,
+        photoUri = photoUri,
         syncedToDevice = syncedToDevice,
         isFavorite = isFavorite,
     )
@@ -117,6 +121,7 @@ data class ContactEntity(
                 longitude = record.longitude,
                 telegramHandle = record.telegramHandle,
                 website = record.website,
+                photoUri = record.photoUri?.takeIf { it.isNotBlank() },
                 syncedToDevice = record.syncedToDevice,
                 isFavorite = record.isFavorite,
                 searchBlob = normalizeForSearch(rawBlob).take(3200),
@@ -215,5 +220,83 @@ data class PaymentTemplateEntity(
         name = name,
         urlTemplate = urlTemplate,
         isDefault = isDefault,
+    )
+}
+
+@Entity(
+    tableName = "call_transcripts",
+    indices = [
+        Index(value = ["contactId"]),
+        Index(value = ["phone"]),
+        Index(value = ["timestampMs"]),
+    ]
+)
+data class CallTranscriptEntity(
+    @PrimaryKey val id: String,
+    val contactId: String?,
+    val phone: String,
+    val contactName: String,
+    val audioFilePath: String,
+    val timestampMs: Long,
+    val durationSec: Long,
+    val transcript: String = "",
+    val highlightsJoined: String = "",
+    val extractedNotes: String = "",
+    val suggestedEventTitle: String = "",
+    val suggestedEventDateIso: String = "",
+    val suggestedEventEpochMs: Long? = null,
+    val suggestedCategory: String = "",
+    val eventAddedToCalendar: Boolean = false,
+    val notesSavedToContact: Boolean = false,
+    val status: String = "PENDING",
+) {
+    fun toDomain() = CallTranscriptRecord(
+        id = id,
+        contactId = contactId,
+        phone = phone,
+        contactName = contactName,
+        audioFilePath = audioFilePath,
+        timestampMs = timestampMs,
+        durationSec = durationSec,
+        transcript = transcript,
+        highlights = highlightsJoined.split("\u001F").filter { it.isNotBlank() },
+        extractedNotes = extractedNotes,
+        suggestedEventTitle = suggestedEventTitle,
+        suggestedEventDateIso = suggestedEventDateIso,
+        suggestedEventEpochMs = suggestedEventEpochMs,
+        suggestedCategory = suggestedCategory,
+        eventAddedToCalendar = eventAddedToCalendar,
+        notesSavedToContact = notesSavedToContact,
+        status = status,
+    )
+}
+
+@Entity(
+    tableName = "dial_history",
+    indices = [
+        Index(value = ["typedAtEpochMs"]),
+        Index(value = ["isDeleted"]),
+        Index(value = ["phoneNumber"]),
+    ]
+)
+data class DialHistoryEntity(
+    @PrimaryKey val id: String,
+    val phoneNumber: String,
+    val matchedContactId: String?,
+    val matchedName: String?,
+    val didCall: Boolean,
+    val typedAtEpochMs: Long,
+    val isDeleted: Boolean = false,
+    val deletedAtEpochMs: Long? = null,
+) {
+    fun toDomain() = DialHistoryEntry(
+        id = id,
+        phoneNumber = phoneNumber,
+        matchedContactId = matchedContactId,
+        matchedName = matchedName,
+        didCall = didCall,
+        typedAtEpochMs = typedAtEpochMs,
+        isDeleted = isDeleted,
+        deletedAtEpochMs = deletedAtEpochMs,
     )
 }

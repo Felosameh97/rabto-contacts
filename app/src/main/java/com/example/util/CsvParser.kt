@@ -104,7 +104,7 @@ object CsvParser {
 
             contacts += ContactDeduplicator.enrichSingleContact(
                 ContactRecord(
-                    id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
+                    id = ContactDeduplicator.deterministicContactId(matches, listOfNotNull(emailMatch), name),
                     displayName = name,
                     primaryPhone = matches.first(),
                     phones = matches,
@@ -208,7 +208,7 @@ object CsvParser {
 
             val geoMatch = EgyptGeoLookup.inferLocation(address, rawName, notes, rawLabels.joinToString(" "))
                 ?: phones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
-            val contactId = "c_" + UUID.randomUUID().toString().replace("-", "").take(16)
+            val contactId = ContactDeduplicator.deterministicContactId(phones, emails, rawName)
             val enriched = ContactDeduplicator.enrichSingleContact(
                 ContactRecord(
                     id = contactId,
@@ -305,7 +305,11 @@ object CsvParser {
             val geo = EgyptGeoLookup.inferLocation(displayName, fullPath, "eaeat")
             val enriched = ContactDeduplicator.enrichSingleContact(
                 ContactRecord(
-                    id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
+                    id = ContactDeduplicator.deterministicContactId(
+                        listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
+                        listOfNotNull(rawEmail.takeIf { it.contains("@") }),
+                        displayName,
+                    ),
                     displayName = displayName.take(200),
                     primaryPhone = normalizedPhone,
                     phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),

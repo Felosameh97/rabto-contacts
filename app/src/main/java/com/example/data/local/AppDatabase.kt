@@ -15,6 +15,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
+import com.example.util.SimPreference
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -26,8 +27,10 @@ import kotlinx.coroutines.flow.map
         CategoryEntity::class,
         WhatsAppLogEntity::class,
         PaymentTemplateEntity::class,
+        CallTranscriptEntity::class,
+        DialHistoryEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class RabtaDatabase : RoomDatabase() {
@@ -35,6 +38,8 @@ abstract class RabtaDatabase : RoomDatabase() {
     abstract fun categoryDao(): CategoryDao
     abstract fun whatsAppLogDao(): WhatsAppLogDao
     abstract fun paymentTemplateDao(): PaymentTemplateDao
+    abstract fun callTranscriptDao(): CallTranscriptDao
+    abstract fun dialHistoryDao(): DialHistoryDao
 
     companion object {
         @Volatile
@@ -47,6 +52,57 @@ abstract class RabtaDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE contacts ADD COLUMN photoUri TEXT")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `call_transcripts` (
+                        `id` TEXT NOT NULL,
+                        `contactId` TEXT,
+                        `phone` TEXT NOT NULL,
+                        `contactName` TEXT NOT NULL,
+                        `audioFilePath` TEXT NOT NULL,
+                        `timestampMs` INTEGER NOT NULL,
+                        `durationSec` INTEGER NOT NULL,
+                        `transcript` TEXT NOT NULL DEFAULT '',
+                        `highlightsJoined` TEXT NOT NULL DEFAULT '',
+                        `extractedNotes` TEXT NOT NULL DEFAULT '',
+                        `suggestedEventTitle` TEXT NOT NULL DEFAULT '',
+                        `suggestedEventDateIso` TEXT NOT NULL DEFAULT '',
+                        `suggestedEventEpochMs` INTEGER,
+                        `suggestedCategory` TEXT NOT NULL DEFAULT '',
+                        `eventAddedToCalendar` INTEGER NOT NULL DEFAULT 0,
+                        `notesSavedToContact` INTEGER NOT NULL DEFAULT 0,
+                        `status` TEXT NOT NULL DEFAULT 'PENDING',
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_call_transcripts_contactId` ON `call_transcripts` (`contactId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_call_transcripts_phone` ON `call_transcripts` (`phone`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_call_transcripts_timestampMs` ON `call_transcripts` (`timestampMs`)")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `dial_history` (
+                        `id` TEXT NOT NULL,
+                        `phoneNumber` TEXT NOT NULL,
+                        `matchedContactId` TEXT,
+                        `matchedName` TEXT,
+                        `didCall` INTEGER NOT NULL,
+                        `typedAtEpochMs` INTEGER NOT NULL,
+                        `isDeleted` INTEGER NOT NULL DEFAULT 0,
+                        `deletedAtEpochMs` INTEGER,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dial_history_typedAtEpochMs` ON `dial_history` (`typedAtEpochMs`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dial_history_isDeleted` ON `dial_history` (`isDeleted`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dial_history_phoneNumber` ON `dial_history` (`phoneNumber`)")
+            }
+        }
+
         fun getInstance(context: Context): RabtaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -54,7 +110,7 @@ abstract class RabtaDatabase : RoomDatabase() {
                     RabtaDatabase::class.java,
                     "rabta_contacts.db"
                 )
-                    .addMigrations(MIGRATION_2_3)
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }
@@ -72,6 +128,11 @@ class SyncPrefsDataStore(private val context: Context) {
     private val themeModeKey = stringPreferencesKey("theme_mode")
     private val paletteKey = stringPreferencesKey("calm_palette")
     private val autoRecordKey = booleanPreferencesKey("auto_record_calls")
+    private val showPhotosKey = booleanPreferencesKey("show_contact_photos")
+    private val callBgPhotoKey = booleanPreferencesKey("call_photo_background")
+    private val strictIsolationKey = booleanPreferencesKey("strict_phonebook_isolation")
+    private val autoTranscribeKey = booleanPreferencesKey("auto_transcribe_calls")
+    private val simPrefKey = stringPreferencesKey("sim_preference")
 
     val githubRepoFlow: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[githubRepoKey] ?: ""
@@ -99,6 +160,27 @@ class SyncPrefsDataStore(private val context: Context) {
         prefs[autoRecordKey] ?: false
     }
 
+    val showContactPhotosFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[showPhotosKey] ?: true
+    }
+
+    val callPhotoBackgroundFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[callBgPhotoKey] ?: true
+    }
+
+    val strictPhonebookIsolationFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[strictIsolationKey] ?: true
+    }
+
+    val autoTranscribeCallsFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[autoTranscribeKey] ?: true
+    }
+
+    val simPreferenceFlow: Flow<SimPreference> = context.dataStore.data.map { prefs ->
+        runCatching { SimPreference.valueOf(prefs[simPrefKey] ?: SimPreference.ASK_OR_BOTH.name) }
+            .getOrDefault(SimPreference.ASK_OR_BOTH)
+    }
+
     suspend fun setGithubRepoSlug(slug: String) {
         context.dataStore.edit { it[githubRepoKey] = slug.trim() }
     }
@@ -121,5 +203,25 @@ class SyncPrefsDataStore(private val context: Context) {
 
     suspend fun setAutoRecordCalls(enabled: Boolean) {
         context.dataStore.edit { it[autoRecordKey] = enabled }
+    }
+
+    suspend fun setShowContactPhotos(enabled: Boolean) {
+        context.dataStore.edit { it[showPhotosKey] = enabled }
+    }
+
+    suspend fun setCallPhotoBackground(enabled: Boolean) {
+        context.dataStore.edit { it[callBgPhotoKey] = enabled }
+    }
+
+    suspend fun setStrictPhonebookIsolation(enabled: Boolean) {
+        context.dataStore.edit { it[strictIsolationKey] = enabled }
+    }
+
+    suspend fun setAutoTranscribeCalls(enabled: Boolean) {
+        context.dataStore.edit { it[autoTranscribeKey] = enabled }
+    }
+
+    suspend fun setSimPreference(pref: SimPreference) {
+        context.dataStore.edit { it[simPrefKey] = pref.name }
     }
 }

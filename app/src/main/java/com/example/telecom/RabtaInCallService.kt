@@ -16,10 +16,13 @@ import android.telecom.TelecomManager
 import android.telecom.VideoProfile
 import androidx.core.app.NotificationCompat
 import com.example.R
+import com.example.data.local.CallTranscriptEntity
 import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
 import com.example.domain.model.ContactRecord
 import com.example.util.PhoneUtils
+import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -51,6 +54,8 @@ class RabtaInCallService : InCallService() {
     private var timerJob: Job? = null
     private var activeCall: Call? = null
     private var callStartTimeMs: Long = 0L
+    private var callLoggedForCurrentCall: Boolean = false
+    private var lastSavedRecordingFile: File? = null
 
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
@@ -81,6 +86,8 @@ class RabtaInCallService : InCallService() {
         val rawNumber = call.details?.handle?.schemeSpecificPart.orEmpty()
         val normalized = PhoneUtils.normalizePhone(rawNumber).ifBlank { rawNumber }
         callStartTimeMs = 0L
+        callLoggedForCurrentCall = false
+        lastSavedRecordingFile = null
 
         _uiState.value = ActiveCallUiState(
             hasActiveCall = true,
@@ -110,9 +117,10 @@ class RabtaInCallService : InCallService() {
         super.onCallRemoved(call)
         call.unregisterCallback(callCallback)
         if (activeCall === call) {
-            activeCall = null
             timerJob?.cancel()
             stopRecordingInternal()
+            persistCompletedCallIfNeeded()
+            activeCall = null
             _uiState.value = ActiveCallUiState()
             cancelCallNotification()
         }
@@ -148,6 +156,7 @@ class RabtaInCallService : InCallService() {
         } else if (state == Call.STATE_DISCONNECTED) {
             timerJob?.cancel()
             stopRecordingInternal()
+            persistCompletedCallIfNeeded()
         }
     }
 
@@ -184,10 +193,47 @@ class RabtaInCallService : InCallService() {
     private fun stopRecordingInternal() {
         if (_uiState.value.isRecording) {
             val saved = CallRecorderManager.stopRecording()
+            if (saved != null) {
+                lastSavedRecordingFile = saved
+            }
             _uiState.value = _uiState.value.copy(
                 isRecording = false,
                 recordingStatusNote = if (saved != null) "تم حفظ التسجيل: ${saved.name}" else null,
             )
+        }
+    }
+
+    private fun persistCompletedCallIfNeeded() {
+        if (callLoggedForCurrentCall) return
+        val snapshot = _uiState.value
+        val audioFile = lastSavedRecordingFile
+        if (snapshot.phoneNumber.isBlank() && audioFile == null) return
+        callLoggedForCurrentCall = true
+
+        val duration = if (callStartTimeMs > 0L) {
+            ((System.currentTimeMillis() - callStartTimeMs) / 1000L).coerceAtLeast(1L)
+        } else {
+            snapshot.elapsedSec
+        }
+        val contactId = snapshot.matchedContact?.id
+        val contactName = snapshot.matchedContact?.displayName
+            ?.ifBlank { snapshot.phoneNumber }
+            ?: snapshot.phoneNumber.ifBlank { "مكالمة" }
+
+        val entry = CallTranscriptEntity(
+            id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
+            contactId = contactId,
+            phone = snapshot.phoneNumber,
+            contactName = contactName,
+            audioFilePath = audioFile?.absolutePath.orEmpty(),
+            timestampMs = System.currentTimeMillis(),
+            durationSec = duration,
+            status = if (audioFile != null && audioFile.exists() && audioFile.length() > 512L) "PENDING" else "NO_AUDIO",
+        )
+        serviceScope.launch(Dispatchers.IO) {
+            runCatching {
+                RabtaDatabase.getInstance(applicationContext).callTranscriptDao().upsert(entry)
+            }
         }
     }
 
@@ -203,7 +249,7 @@ class RabtaInCallService : InCallService() {
             val nm = getSystemService(NotificationManager::class.java) ?: return
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "مكالمات رابطة",
+                "مكالمات Felo Contacts",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "شاشة المكالمة الواردة والنشطة"
@@ -230,7 +276,7 @@ class RabtaInCallService : InCallService() {
         }
         val notif: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title.ifBlank { "مكالمة رابطة" })
+            .setContentTitle(title.ifBlank { "مكالمة Felo Contacts" })
             .setContentText(subtitle)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)

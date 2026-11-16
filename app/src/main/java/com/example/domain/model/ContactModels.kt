@@ -47,6 +47,7 @@ data class ContactRecord(
     val longitude: Double? = null,
     val telegramHandle: String? = null,
     val website: String? = null,
+    val photoUri: String? = null,
     val syncedToDevice: Boolean = false,
     val isFavorite: Boolean = false,
     @ServerTimestamp val createdAt: Timestamp? = null,
@@ -165,6 +166,37 @@ data class CallLogEntry(
     val durationSec: Long,
     val callCount: Int,
     val matchedContact: ContactRecord? = null,
+)
+
+data class CallTranscriptRecord(
+    val id: String,
+    val contactId: String? = null,
+    val phone: String = "",
+    val contactName: String = "",
+    val audioFilePath: String = "",
+    val timestampMs: Long = 0L,
+    val durationSec: Long = 0L,
+    val transcript: String = "",
+    val highlights: List<String> = emptyList(),
+    val extractedNotes: String = "",
+    val suggestedEventTitle: String = "",
+    val suggestedEventDateIso: String = "",
+    val suggestedEventEpochMs: Long? = null,
+    val suggestedCategory: String = "",
+    val eventAddedToCalendar: Boolean = false,
+    val notesSavedToContact: Boolean = false,
+    val status: String = "PENDING",
+)
+
+data class DialHistoryEntry(
+    val id: String,
+    val phoneNumber: String,
+    val matchedContactId: String?,
+    val matchedName: String?,
+    val didCall: Boolean,
+    val typedAtEpochMs: Long,
+    val isDeleted: Boolean,
+    val deletedAtEpochMs: Long?,
 )
 
 data class CategorySummary(

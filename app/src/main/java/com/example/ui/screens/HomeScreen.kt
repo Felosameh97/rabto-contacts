@@ -31,12 +31,14 @@ import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Chat
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.QrCodeScanner
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Star
@@ -50,6 +52,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
@@ -60,20 +63,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.R
 import com.example.domain.model.CallLogEntry
+import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.WhatsAppLog
 import com.example.ui.components.ContactSummaryCard
 import com.example.ui.theme.WhatsAppGreen
 import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -91,6 +98,10 @@ fun HomeScreen(
     bundledImported: Boolean,
     importProgressText: String?,
     cloudSyncStatus: String?,
+    showContactPhotos: Boolean = true,
+    preferredSimSlot: Int? = null,
+    strictPhonebookIsolation: Boolean = true,
+    recentTranscripts: List<CallTranscriptRecord> = emptyList(),
     onSearchQueryChange: (String) -> Unit,
     onOpenContact: (ContactRecord) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
@@ -102,6 +113,8 @@ fun HomeScreen(
     onOpenAiAssistant: () -> Unit,
     onImportBundledCsv: () -> Unit,
     onSyncWeeklyWhatsApp: () -> Unit,
+    onSaveCallNotes: (CallTranscriptRecord) -> Unit = {},
+    onMarkCalendarAdded: (String) -> Unit = {},
     onPermissionsChanged: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -202,12 +215,84 @@ fun HomeScreen(
                     ContactSummaryCard(
                         contact = contact,
                         onClick = { onOpenContact(contact) },
-                        onCall = { phone -> SystemIntents.dialPhone(context, phone) },
+                        onCall = { phone -> SystemIntents.dialPhoneWithSimSlot(context, phone, preferredSimSlot) },
                         onWhatsApp = { phone -> onWhatsApp(contact, phone) },
+                        showPhoto = showContactPhotos,
                     )
                 }
             }
             return@LazyColumn
+        }
+
+        // Post-Call AI Organizer card (Calendar events & Notes extracted from calls)
+        val pendingOrganizer = recentTranscripts.firstOrNull {
+            it.status == "READY" &&
+                ((it.suggestedEventTitle.isNotBlank() && !it.eventAddedToCalendar) ||
+                    (it.extractedNotes.isNotBlank() && !it.notesSavedToContact))
+        }
+        if (pendingOrganizer != null) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
+                            Text(
+                                text = "تنظيم ذكي بعد مكالمة ${pendingOrganizer.contactName}",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                        }
+                        if (pendingOrganizer.suggestedEventTitle.isNotBlank()) {
+                            Text(
+                                text = "موعد مقترح: ${pendingOrganizer.suggestedEventTitle}" +
+                                    if (pendingOrganizer.suggestedEventDateIso.isNotBlank()) " (${pendingOrganizer.suggestedEventDateIso})" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            )
+                        }
+                        if (pendingOrganizer.extractedNotes.isNotBlank()) {
+                            Text(
+                                text = "ملخص: ${pendingOrganizer.extractedNotes}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (pendingOrganizer.suggestedEventTitle.isNotBlank() && !pendingOrganizer.eventAddedToCalendar) {
+                                Button(
+                                    onClick = {
+                                        SystemIntents.insertCalendarEvent(
+                                            context = context,
+                                            title = pendingOrganizer.suggestedEventTitle,
+                                            description = "${pendingOrganizer.contactName} (${pendingOrganizer.phone})\n${pendingOrganizer.extractedNotes}",
+                                            startEpochMs = pendingOrganizer.suggestedEventEpochMs,
+                                        )
+                                        onMarkCalendarAdded(pendingOrganizer.id)
+                                    },
+                                    modifier = Modifier.testTag("home_add_calendar_btn"),
+                                ) {
+                                    Icon(Icons.Rounded.CalendarMonth, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("أضف للتقويم")
+                                }
+                            }
+                            if (pendingOrganizer.extractedNotes.isNotBlank() && !pendingOrganizer.notesSavedToContact) {
+                                OutlinedButton(onClick = { onSaveCallNotes(pendingOrganizer) }) {
+                                    Icon(Icons.Rounded.NoteAdd, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("حفظ الملاحظات")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Clean Home Status & Quick Actions (no 20,000 list on Home!)
@@ -225,7 +310,7 @@ fun HomeScreen(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "قاعدة رابطة السريعة",
+                                text = "قاعدة Felo Contacts السريعة",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                             )
@@ -324,9 +409,9 @@ fun HomeScreen(
             }
         }
 
-        // 7-day WhatsApp selective sync banner
+        // 7-day WhatsApp selective sync banner (hidden when strict phonebook isolation is enabled)
         val unsyncedWeeklyContacts = weeklyLogs.filter { !it.syncedToPhone }.distinctBy { it.contactId }
-        if (unsyncedWeeklyContacts.isNotEmpty()) {
+        if (!strictPhonebookIsolation && unsyncedWeeklyContacts.isNotEmpty()) {
             item {
                 Card(
                     shape = RoundedCornerShape(18.dp),
@@ -382,10 +467,11 @@ fun HomeScreen(
                     favorites.forEach { fav ->
                         FavoriteChipCard(
                             contact = fav,
+                            showPhoto = showContactPhotos,
                             onClick = { onOpenContact(fav) },
                             onCall = {
                                 val num = fav.primaryPhone.ifBlank { fav.phones.firstOrNull().orEmpty() }
-                                SystemIntents.dialPhone(context, num)
+                                SystemIntents.dialPhoneWithSimSlot(context, num, preferredSimSlot)
                             },
                         )
                     }
@@ -432,10 +518,10 @@ fun HomeScreen(
                             if (entry.matchedContact != null) {
                                 onOpenContact(entry.matchedContact)
                             } else {
-                                SystemIntents.dialPhone(context, entry.number)
+                                SystemIntents.dialPhoneWithSimSlot(context, entry.number, preferredSimSlot)
                             }
                         },
-                        onDial = { SystemIntents.dialPhone(context, entry.number) },
+                        onDial = { SystemIntents.dialPhoneWithSimSlot(context, entry.number, preferredSimSlot) },
                         onWhatsApp = {
                             val target = entry.matchedContact ?: ContactRecord(
                                 id = "call_${entry.number.hashCode()}",
@@ -460,10 +546,10 @@ fun HomeScreen(
                             if (entry.matchedContact != null) {
                                 onOpenContact(entry.matchedContact)
                             } else {
-                                SystemIntents.dialPhone(context, entry.number)
+                                SystemIntents.dialPhoneWithSimSlot(context, entry.number, preferredSimSlot)
                             }
                         },
-                        onDial = { SystemIntents.dialPhone(context, entry.number) },
+                        onDial = { SystemIntents.dialPhoneWithSimSlot(context, entry.number, preferredSimSlot) },
                         onWhatsApp = {
                             val target = entry.matchedContact ?: ContactRecord(
                                 id = "call_${entry.number.hashCode()}",
@@ -483,6 +569,7 @@ fun HomeScreen(
 @Composable
 private fun FavoriteChipCard(
     contact: ContactRecord,
+    showPhoto: Boolean = true,
     onClick: () -> Unit,
     onCall: () -> Unit,
 ) {
@@ -495,6 +582,7 @@ private fun FavoriteChipCard(
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                val hasPhoto = showPhoto && !contact.photoUri.isNullOrBlank() && File(contact.photoUri).exists()
                 Box(
                     modifier = Modifier
                         .size(34.dp)
@@ -502,11 +590,20 @@ private fun FavoriteChipCard(
                         .background(MaterialTheme.colorScheme.primaryContainer),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Text(
-                        contact.displayName.firstOrNull()?.uppercase() ?: "#",
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
+                    if (hasPhoto) {
+                        AsyncImage(
+                            model = File(contact.photoUri!!),
+                            contentDescription = contact.displayName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        Text(
+                            contact.displayName.firstOrNull()?.uppercase() ?: "#",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
                 }
                 IconButton(onClick = onCall, modifier = Modifier.size(32.dp)) {
                     Icon(Icons.Rounded.Call, contentDescription = "اتصال", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))

@@ -159,7 +159,7 @@ class DeviceContactsManager(private val context: Context) {
                 val rawLabels = labelsByCid[cid]?.toList().orEmpty() + listOf("الهاتف (مستورد)")
 
                 val rawRecord = ContactRecord(
-                    id = "dev_${cid}_${UUID.nameUUIDFromBytes(displayName.toByteArray()).toString().take(6)}",
+                    id = ContactDeduplicator.deterministicContactId(phones, emails, displayName),
                     displayName = displayName.take(200),
                     nickname = nick,
                     primaryPhone = phones.firstOrNull().orEmpty(),
@@ -170,7 +170,7 @@ class DeviceContactsManager(private val context: Context) {
                     jobTitle = orgPair?.second,
                     notes = notes,
                     address = address,
-                    syncedToDevice = true,
+                    syncedToDevice = false, // Keep isolated inside Felo Contacts unless explicitly flagged
                     isFavorite = starredSet.contains(cid),
                 )
                 val enriched = ContactDeduplicator.enrichSingleContact(rawRecord)

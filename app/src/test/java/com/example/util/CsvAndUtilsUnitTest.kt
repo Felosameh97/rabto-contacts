@@ -170,6 +170,32 @@ class CsvAndUtilsUnitTest {
         assertTrue(merged.tags.contains("2023"))
         assertTrue(merged.tags.contains("Vodafone"))
     }
+
+    @Test
+    fun deterministicContactId_preventsReimportDuplicatesAndPreservesPhoto() {
+        val id1 = ContactDeduplicator.deterministicContactId(listOf("+201012345678"), emptyList(), "Ahmed")
+        val id2 = ContactDeduplicator.deterministicContactId(listOf("010-123-45678"), emptyList(), "أحمد")
+        assertEquals(id1, id2)
+
+        val cWithPhoto = com.example.domain.model.ContactRecord(
+            id = "old_1",
+            displayName = "Ahmed",
+            primaryPhone = "01012345678",
+            phones = listOf("01012345678"),
+            photoUri = "/data/user/0/app/files/contact_photos/a.jpg",
+        )
+        val cCloud = com.example.domain.model.ContactRecord(
+            id = "cloud_2",
+            displayName = "Ahmed Mohamed Ali",
+            primaryPhone = "+201012345678",
+            phones = listOf("+201012345678"),
+            notes = "مهندس مدني",
+        )
+        val mergedRes = ContactDeduplicator.deduplicateAndMerge(listOf(cWithPhoto, cCloud))
+        assertEquals(1, mergedRes.mergedContacts.size)
+        assertEquals("/data/user/0/app/files/contact_photos/a.jpg", mergedRes.mergedContacts.first().photoUri)
+        assertTrue(com.example.ai.RabtaAiAssistant.parseIsoDateToEpochMs("2026-11-20T14:30") != null)
+    }
 }
 
 

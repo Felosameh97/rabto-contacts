@@ -280,3 +280,60 @@ interface PaymentTemplateDao {
     @Query("DELETE FROM payment_templates WHERE id = :id")
     suspend fun deleteById(id: String)
 }
+
+@Dao
+interface CallTranscriptDao {
+    @Query("SELECT * FROM call_transcripts ORDER BY timestampMs DESC LIMIT 200")
+    fun observeAll(): Flow<List<CallTranscriptEntity>>
+
+    @Query("SELECT * FROM call_transcripts WHERE status = 'PENDING' ORDER BY timestampMs DESC LIMIT 10")
+    suspend fun getPending(): List<CallTranscriptEntity>
+
+    @Query("SELECT * FROM call_transcripts WHERE contactId = :contactId OR phone LIKE '%' || :phoneSuffix ORDER BY timestampMs DESC")
+    suspend fun getForContactOrPhone(contactId: String, phoneSuffix: String): List<CallTranscriptEntity>
+
+    @Query("SELECT * FROM call_transcripts WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): CallTranscriptEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: CallTranscriptEntity)
+
+    @Query("UPDATE call_transcripts SET eventAddedToCalendar = 1 WHERE id = :id")
+    suspend fun markCalendarAdded(id: String)
+
+    @Query("UPDATE call_transcripts SET notesSavedToContact = 1 WHERE id = :id")
+    suspend fun markNotesSaved(id: String)
+
+    @Query("DELETE FROM call_transcripts WHERE id = :id")
+    suspend fun deleteById(id: String)
+}
+
+@Dao
+interface DialHistoryDao {
+    @Query("SELECT * FROM dial_history WHERE isDeleted = 0 ORDER BY typedAtEpochMs DESC LIMIT 40")
+    fun observeActiveHistory(): Flow<List<DialHistoryEntity>>
+
+    @Query("SELECT * FROM dial_history WHERE isDeleted = 0 ORDER BY typedAtEpochMs DESC LIMIT :limit")
+    suspend fun getActiveOnce(limit: Int = 6): List<DialHistoryEntity>
+
+    @Query("SELECT * FROM dial_history WHERE isDeleted = 1 ORDER BY deletedAtEpochMs DESC LIMIT 60")
+    fun observeRecentlyDeleted(): Flow<List<DialHistoryEntity>>
+
+    @Query("SELECT * FROM dial_history WHERE phoneNumber = :phoneNumber AND isDeleted = 0 LIMIT 1")
+    suspend fun findActiveByPhone(phoneNumber: String): DialHistoryEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: DialHistoryEntity)
+
+    @Query("UPDATE dial_history SET isDeleted = 1, deletedAtEpochMs = :deletedAtMs WHERE id = :id")
+    suspend fun softDelete(id: String, deletedAtMs: Long)
+
+    @Query("UPDATE dial_history SET isDeleted = 0, deletedAtEpochMs = NULL, typedAtEpochMs = :restoredAtMs WHERE id = :id")
+    suspend fun restore(id: String, restoredAtMs: Long)
+
+    @Query("DELETE FROM dial_history WHERE id = :id")
+    suspend fun deleteForever(id: String)
+
+    @Query("DELETE FROM dial_history WHERE isDeleted = 1")
+    suspend fun emptyTrash()
+}
