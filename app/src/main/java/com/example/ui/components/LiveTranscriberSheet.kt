@@ -1,7 +1,11 @@
 package com.example.ui.components
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.speech.RecognizerIntent
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -27,6 +31,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
@@ -37,6 +42,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -98,6 +104,23 @@ fun LiveTranscriberSheet(
     ) { granted ->
         if (granted) {
             transcriber.start(selectedLang)
+        }
+    }
+
+    val googleVoiceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { res ->
+        if (res.resultCode == Activity.RESULT_OK) {
+            val spoken = res.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+            if (!spoken.isNullOrBlank()) {
+                transcriber.appendExternalText(spoken)
+                editableTranscript = listOf(editableTranscript, spoken)
+                    .filter { it.isNotBlank() }
+                    .joinToString(". ")
+            }
         }
     }
 
@@ -220,7 +243,14 @@ fun LiveTranscriberSheet(
                 )
             }
 
-            // Live stream text box
+            // Live stream text box + RMS level indicator
+            if (liveState.isListening) {
+                LinearProgressIndicator(
+                    progress = { (liveState.rmsDb / 10f).coerceIn(0.08f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+
             OutlinedTextField(
                 value = editableTranscript,
                 onValueChange = { editableTranscript = it },
@@ -368,6 +398,25 @@ fun LiveTranscriberSheet(
                     Spacer(Modifier.width(6.dp))
                     Text("حفظ واستخراج")
                 }
+            }
+
+            OutlinedButton(
+                onClick = {
+                    transcriber.stop()
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, selectedLang)
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "تحدث الآن باللغة المختارة ($selectedLang)...")
+                    }
+                    runCatching { googleVoiceLauncher.launch(intent) }.onFailure {
+                        Toast.makeText(context, "نافذة التعرف الصوتي غير متوفرة على هذا الهاتف", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().testTag("live_transcriber_google_popup_btn"),
+            ) {
+                Icon(Icons.Rounded.RecordVoiceOver, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("إملاء بنافذة Google الصوتية (بديل فوري مضمون)")
             }
         }
     }

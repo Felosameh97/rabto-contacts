@@ -233,6 +233,22 @@ class CsvAndUtilsUnitTest {
         assertEquals(com.example.ai.AiCommandAction.OPEN_CATEGORY, catCmd?.action)
         assertEquals("الجامعة", catCmd?.categoryPath)
     }
+
+    @Test
+    fun callerInsight_and_recorderSourceOrdering() {
+        assertEquals("فودافون مصر", EgyptGeoLookup.inferCallerInsight("01012345678"))
+        assertEquals("إي آند (اتصالات)", EgyptGeoLookup.inferCallerInsight("+201122334455"))
+        assertEquals("أورنج مصر", EgyptGeoLookup.inferCallerInsight("01288776655"))
+        assertEquals("وي (WE)", EgyptGeoLookup.inferCallerInsight("01555443322"))
+        assertEquals("القاهرة الكبرى (أرضي 02)", EgyptGeoLookup.inferCallerInsight("0224567890"))
+
+        val smartSources = com.example.telecom.CallRecorderManager.orderedSourcesFor(
+            com.example.telecom.RecordingSourceMode.SMART_AUTO
+        )
+        assertEquals("VOICE_RECOGNITION", smartSources.first().second)
+        assertTrue(smartSources.map { it.second }.contains("CAMCORDER"))
+        assertEquals("VOICE_CALL", smartSources.last().second)
+    }
 }
 
 

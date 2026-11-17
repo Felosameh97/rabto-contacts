@@ -94,6 +94,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import android.os.Build
 import com.example.R
 import com.example.domain.model.CallLogEntry
 import com.example.domain.model.CallTranscriptRecord
@@ -101,12 +102,17 @@ import com.example.domain.model.ContactRecord
 import com.example.domain.model.DialHistoryEntry
 import com.example.domain.model.PaymentTemplate
 import com.example.domain.model.WhatsAppLog
+import com.example.telecom.PostCallSummary
 import com.example.telecom.RabtaInCallService
 import com.example.ui.components.ContactSummaryCard
 import com.example.ui.components.IntegratedKeypadPanel
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.EgyptGeoLookup
 import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -135,6 +141,8 @@ fun HomeScreen(
     dialHistory: List<DialHistoryEntry> = emptyList(),
     recentlyDeletedHistory: List<DialHistoryEntry> = emptyList(),
     paymentTemplates: List<PaymentTemplate> = emptyList(),
+    postCallSummary: PostCallSummary? = null,
+    whatsappTemplates: List<String> = emptyList(),
     onSetDialpadExpanded: (Boolean) -> Unit = {},
     onDialpadQueryChange: (String) -> Unit = {},
     onRecordDial: (String, Boolean) -> Unit = { _, _ -> },
@@ -145,6 +153,9 @@ fun HomeScreen(
     onSearchQueryChange: (String) -> Unit,
     onOpenContact: (ContactRecord) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
+    onWhatsAppQuick: (String, String, String?, String?) -> Unit = { _, _, _, _ -> },
+    onScheduleFollowUpQuick: (String, String, String?, Int?) -> Unit = { _, _, _, _ -> },
+    onDismissPostCallSummary: () -> Unit = {},
     onAddContact: () -> Unit,
     onCaptureWhatsApp: () -> Unit,
     onOpenCategories: () -> Unit,
@@ -166,6 +177,7 @@ fun HomeScreen(
     }
     var dismissDialerSetupCard by remember { mutableStateOf(false) }
     var pullDragAccumulator by remember { mutableFloatStateOf(0f) }
+    var showPostCallWaTemplates by remember { mutableStateOf(false) }
 
     BackHandler(enabled = dialpadExpanded) {
         onSetDialpadExpanded(false)
@@ -198,6 +210,14 @@ fun HomeScreen(
     ) {
         onPermissionsChanged()
         onSyncWeeklyWhatsApp()
+    }
+
+    val postCallNotifLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) {
+        postCallSummary?.let { s ->
+            onScheduleFollowUpQuick(s.contactName, s.phone, s.contactId, 60)
+        }
     }
 
     val bottomFeedPadding = if (dialpadExpanded) 410.dp else 92.dp
@@ -500,6 +520,86 @@ fun HomeScreen(
                                 modifier = Modifier.fillMaxWidth().testTag("home_setup_dialer_btn"),
                             ) {
                                 Text(if (!isDefaultDialer) "تعيين كتطبيق الاتصال الافتراضي" else "تفعيل الميكروفون الآن")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Post-Call Instant Quick Action Card (shown immediately after ending a call)
+            postCallSummary?.let { summary ->
+                item {
+                    Card(
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+                        modifier = Modifier.fillMaxWidth().testTag("post_call_summary_card"),
+                    ) {
+                        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "انتهت مكالمة ${summary.contactName}",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    )
+                                    val meta = buildString {
+                                        append(summary.phone)
+                                        if (summary.durationSec > 0) append(" • ${summary.durationSec}ث")
+                                        if (summary.hasRecording) append(" • تم حفظ التسجيل")
+                                    }
+                                    Text(
+                                        text = meta,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f),
+                                    )
+                                }
+                                IconButton(onClick = onDismissPostCallSummary, modifier = Modifier.size(28.dp)) {
+                                    Icon(Icons.Rounded.Close, contentDescription = "إغلاق", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                FilledTonalButton(
+                                    onClick = { SystemIntents.dialPhoneWithSimSlot(context, summary.phone, preferredSimSlot) },
+                                ) {
+                                    Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("معاودة")
+                                }
+                                if (!PhoneUtils.isUssdOrShortCode(summary.phone)) {
+                                    FilledTonalButton(onClick = { showPostCallWaTemplates = true }) {
+                                        Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("رسالة واتساب")
+                                    }
+                                }
+                                FilledTonalButton(
+                                    onClick = {
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+                                        ) {
+                                            postCallNotifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                        } else {
+                                            onScheduleFollowUpQuick(summary.contactName, summary.phone, summary.contactId, 60)
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Rounded.NotificationsActive, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("تذكير بعد ساعة")
+                                }
+                                OutlinedButton(onClick = onOpenLiveTranscriber) {
+                                    Icon(Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text("ملاحظة صوتية")
+                                }
                             }
                         }
                     }
@@ -856,6 +956,47 @@ fun HomeScreen(
             )
         }
     }
+
+    if (showPostCallWaTemplates && postCallSummary != null) {
+        AlertDialog(
+            onDismissRequest = { showPostCallWaTemplates = false },
+            title = { Text("إرسال رسالة واتساب لـ ${postCallSummary.contactName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    whatsappTemplates.forEach { tpl ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onWhatsAppQuick(
+                                        postCallSummary.phone,
+                                        postCallSummary.contactName,
+                                        postCallSummary.contactId,
+                                        tpl,
+                                    )
+                                    showPostCallWaTemplates = false
+                                    onDismissPostCallSummary()
+                                },
+                        ) {
+                            Text(tpl, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(12.dp))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onWhatsAppQuick(postCallSummary.phone, postCallSummary.contactName, postCallSummary.contactId, null)
+                    showPostCallWaTemplates = false
+                    onDismissPostCallSummary()
+                }) { Text("محادثة فارغة") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPostCallWaTemplates = false }) { Text("إلغاء") }
+            },
+        )
+    }
 }
 
 @Composable
@@ -996,8 +1137,14 @@ private fun CallLogRowCard(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(label, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val insight = remember(entry.number, entry.matchedContact) {
+                        if (entry.matchedContact == null) EgyptGeoLookup.inferCallerInsight(entry.number) else null
+                    }
                     Text(
-                        "${entry.number} • ${entry.callCount}× • $timeText",
+                        buildString {
+                            append("${entry.number} • ${entry.callCount}× • $timeText")
+                            if (!insight.isNullOrBlank()) append(" • $insight")
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

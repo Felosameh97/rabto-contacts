@@ -94,8 +94,10 @@ import com.example.domain.model.ContactRecord
 import com.example.domain.model.GitHubReleaseInfo
 import com.example.domain.model.PaymentTemplate
 import com.example.domain.model.WhatsAppLog
+import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
 import com.example.telecom.RabtaInCallService
+import com.example.telecom.RecordingSourceMode
 import com.example.ui.components.AddPaymentTemplateDialog
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
@@ -103,6 +105,9 @@ import com.example.ui.theme.WhatsAppGreen
 import com.example.util.SimPreference
 import com.example.util.SystemIntents
 import com.google.android.gms.auth.api.identity.Identity
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -128,6 +133,10 @@ fun ToolsSyncScreen(
     autoTranscribeCalls: Boolean = false,
     simPreference: SimPreference = SimPreference.ASK_OR_BOTH,
     callTranscripts: List<CallTranscriptRecord> = emptyList(),
+    recordingSourceMode: RecordingSourceMode = RecordingSourceMode.SMART_AUTO,
+    vibrateOnAnswer: Boolean = true,
+    autoSpeakerForRecord: Boolean = false,
+    whatsappTemplates: List<String> = emptyList(),
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetCalmPalette: (CalmPalette) -> Unit,
     onSetAutoRecordCalls: (Boolean) -> Unit,
@@ -136,6 +145,12 @@ fun ToolsSyncScreen(
     onSetStrictPhonebookIsolation: (Boolean) -> Unit = {},
     onSetAutoTranscribeCalls: (Boolean) -> Unit = {},
     onSetSimPreference: (SimPreference) -> Unit = {},
+    onSetRecordingSourceMode: (RecordingSourceMode) -> Unit = {},
+    onSetVibrateOnAnswer: (Boolean) -> Unit = {},
+    onSetAutoSpeakerForRecord: (Boolean) -> Unit = {},
+    onAddWhatsAppTemplate: (String) -> Unit = {},
+    onRemoveWhatsAppTemplate: (String) -> Unit = {},
+    onRefreshRecordings: () -> Unit = {},
     onDeleteRecording: (CallRecordingItem) -> Unit,
     onTranscribeRecording: (CallRecordingItem) -> Unit = {},
     onOpenLiveTranscriber: () -> Unit = {},
@@ -162,6 +177,7 @@ fun ToolsSyncScreen(
     val scope = rememberCoroutineScope()
     var repoInput by remember(githubRepoSlug) { mutableStateOf(githubRepoSlug) }
     var showAddPayment by remember { mutableStateOf(false) }
+    var showAddWaTemplate by remember { mutableStateOf(false) }
     var driveErrorMsg by remember { mutableStateOf<String?>(null) }
     var isDefaultDialer by remember { mutableStateOf(RabtaInCallService.isDefaultDialer(context)) }
     var hasMicPermission by remember {
@@ -171,6 +187,8 @@ fun ToolsSyncScreen(
     }
     var playingPath by remember { mutableStateOf<String?>(null) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var isTestingMic by remember { mutableStateOf(false) }
+    var micTestMessage by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -485,6 +503,116 @@ fun ToolsSyncScreen(
                             modifier = Modifier.testTag("tools_auto_record_switch"),
                         )
                     }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("اهتزاز خفيف عند رد الطرف الآخر", style = MaterialTheme.typography.titleSmall)
+                            Text("يعطيك إشارة لمسية فور بدء المكالمة دون تثبيت الهاتف على الأذن.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = vibrateOnAnswer,
+                            onCheckedChange = onSetVibrateOnAnswer,
+                            modifier = Modifier.testTag("tools_vibrate_answer_switch"),
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("تفعيل السبيكر تلقائياً لوضوح التسجيل", style = MaterialTheme.typography.titleSmall)
+                            Text("يضمن التقاط صوت الطرف الآخر بوضوح على كل هواتف أندرويد الحديثة.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = autoSpeakerForRecord,
+                            onCheckedChange = onSetAutoSpeakerForRecord,
+                            modifier = Modifier.testTag("tools_auto_speaker_switch"),
+                        )
+                    }
+
+                    Text("مسار التقاط الصوت:", style = MaterialTheme.typography.labelLarge)
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        RecordingSourceMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = recordingSourceMode == mode,
+                                onClick = { onSetRecordingSourceMode(mode) },
+                                label = { Text(mode.labelAr) },
+                            )
+                        }
+                    }
+
+                    // 3-Second Mic & Playback Self-Test
+                    OutlinedButton(
+                        enabled = !isTestingMic,
+                        onClick = {
+                            val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                            if (!granted) {
+                                recordAudioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                return@OutlinedButton
+                            }
+                            scope.launch {
+                                isTestingMic = true
+                                micTestMessage = "جاري تسجيل عينة 3 ثواني — تحدث الآن..."
+                                val startRes = CallRecorderManager.startRecording(
+                                    context = context,
+                                    labelOrNumber = "MicTest",
+                                    sourceMode = recordingSourceMode,
+                                    allowSilentSwap = false,
+                                )
+                                if (startRes.isFailure) {
+                                    isTestingMic = false
+                                    micTestMessage = startRes.exceptionOrNull()?.localizedMessage ?: "فشل اختبار الميكروفون"
+                                    return@launch
+                                }
+                                delay(3200L)
+                                val recorded = CallRecorderManager.stopRecording()
+                                isTestingMic = false
+                                onRefreshRecordings()
+                                if (recorded != null) {
+                                    micTestMessage = "جاري تشغيل العينة المسجلة (${recorded.length() / 1024} KB)..."
+                                    runCatching {
+                                        mediaPlayer?.stop()
+                                        mediaPlayer?.release()
+                                    }
+                                    mediaPlayer = CallRecorderManager.playAudioFile(
+                                        context = context,
+                                        file = recorded,
+                                        onStart = { playingPath = recorded.absolutePath },
+                                        onComplete = {
+                                            playingPath = null
+                                            micTestMessage = "✓ الصوت والتسجيل يعملان بنجاح!"
+                                        },
+                                        onError = { err ->
+                                            playingPath = null
+                                            micTestMessage = err
+                                        },
+                                    )
+                                } else {
+                                    micTestMessage = "لم يتم حفظ عينة صالحة — غيّر مسار الصوت وجرب مجدداً"
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().testTag("tools_mic_test_btn"),
+                    ) {
+                        Icon(Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (isTestingMic) "جاري اختبار الميكروفون (3 ثواني)..." else "اختبار التسجيل والصوت (3 ثواني)")
+                    }
+                    if (isTestingMic) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                    micTestMessage?.let { msg ->
+                        Text(msg, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                    }
                 }
             }
         }
@@ -520,22 +648,23 @@ fun ToolsSyncScreen(
                                         mediaPlayer = null
                                         playingPath = null
                                     } else {
-                                        runCatching {
-                                            mediaPlayer?.stop()
-                                            mediaPlayer?.release()
-                                            mediaPlayer = MediaPlayer().apply {
-                                                setDataSource(rec.file.absolutePath)
-                                                prepare()
-                                                start()
-                                                setOnCompletionListener {
-                                                    playingPath = null
+                                                runCatching {
+                                                    mediaPlayer?.stop()
+                                                    mediaPlayer?.release()
                                                 }
+                                                mediaPlayer = CallRecorderManager.playAudioFile(
+                                                    context = context,
+                                                    file = rec.file,
+                                                    onStart = { playingPath = rec.file.absolutePath },
+                                                    onComplete = { playingPath = null },
+                                                    onError = { err ->
+                                                        playingPath = null
+                                                        Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+                                                    },
+                                                )
                                             }
-                                            playingPath = rec.file.absolutePath
                                         }
-                                    }
-                                }
-                            ) {
+                                    ) {
                                 Icon(
                                     if (isPlaying) Icons.Rounded.Stop else Icons.Rounded.PlayArrow,
                                     contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
@@ -844,6 +973,46 @@ fun ToolsSyncScreen(
             }
         }
 
+        // Section 4B: Quick WhatsApp Message Templates
+        item {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen)
+                            Text("قوالب رسائل واتساب السريعة", style = MaterialTheme.typography.titleMedium)
+                        }
+                        IconButton(onClick = { showAddWaTemplate = true }) {
+                            Icon(Icons.Rounded.Add, contentDescription = "إضافة رسالة واتساب جاهزة")
+                        }
+                    }
+                    whatsappTemplates.forEach { tpl ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = tpl,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f),
+                            )
+                            IconButton(onClick = { onRemoveWhatsAppTemplate(tpl) }) {
+                                Icon(Icons.Rounded.Delete, contentDescription = "حذف القالب", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Section 5: GitHub Releases Auto-Update Checker
         item {
             Card(
@@ -1027,6 +1196,34 @@ fun ToolsSyncScreen(
             onSave = { name, tpl ->
                 onAddPaymentTemplate(name, tpl)
                 showAddPayment = false
+            },
+        )
+    }
+
+    if (showAddWaTemplate) {
+        var newTpl by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddWaTemplate = false },
+            title = { Text("إضافة رسالة واتساب جاهزة") },
+            text = {
+                OutlinedTextField(
+                    value = newTpl,
+                    onValueChange = { newTpl = it },
+                    label = { Text("نص الرسالة") },
+                    minLines = 2,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (newTpl.isNotBlank()) {
+                        onAddWhatsAppTemplate(newTpl)
+                        showAddWaTemplate = false
+                    }
+                }) { Text("إضافة") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddWaTemplate = false }) { Text("إلغاء") }
             },
         )
     }

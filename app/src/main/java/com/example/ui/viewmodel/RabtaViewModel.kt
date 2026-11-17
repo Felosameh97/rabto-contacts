@@ -32,12 +32,16 @@ import com.example.domain.model.PaymentTemplate
 import com.example.domain.model.WhatsAppLog
 import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
+import com.example.telecom.PostCallSummary
+import com.example.telecom.RabtaInCallService
+import com.example.telecom.RecordingSourceMode
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
 import com.example.util.BilingualNameEngine
 import com.example.util.ContactDeduplicator
 import com.example.util.CsvParser
 import com.example.util.EgyptGeoLookup
+import com.example.util.FollowUpReminderScheduler
 import com.example.util.PaymentUtils
 import com.example.util.PhoneUtils
 import com.example.util.SimPreference
@@ -167,6 +171,26 @@ class RabtaViewModel(
 
     val simPreference: StateFlow<SimPreference> = prefs.simPreferenceFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SimPreference.ASK_OR_BOTH)
+
+    val recordingSourceMode: StateFlow<RecordingSourceMode> = prefs.recordingSourceFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), RecordingSourceMode.SMART_AUTO)
+
+    val vibrateOnAnswer: StateFlow<Boolean> = prefs.vibrateOnAnswerFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val autoSpeakerForRecord: StateFlow<Boolean> = prefs.autoSpeakerForRecordFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val lockedCategories: StateFlow<Set<String>> = prefs.lockedCategoriesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
+    val whatsappTemplates: StateFlow<List<String>> = prefs.whatsappTemplatesFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SyncPrefsDataStore.DEFAULT_WHATSAPP_TEMPLATES)
+
+    private val _sessionUnlockedCategories = MutableStateFlow<Set<String>>(emptySet())
+    val sessionUnlockedCategories = _sessionUnlockedCategories.asStateFlow()
+
+    val postCallSummary: StateFlow<PostCallSummary?> = RabtaInCallService.lastEndedCallSummary
 
     val preferredSimSlot: StateFlow<Int?> = simPreference
         .map { pref ->
@@ -359,6 +383,113 @@ class RabtaViewModel(
 
     fun setSimPreference(pref: SimPreference) {
         viewModelScope.launch { prefs.setSimPreference(pref) }
+    }
+
+    fun setRecordingSourceMode(mode: RecordingSourceMode) {
+        viewModelScope.launch { prefs.setRecordingSourceMode(mode) }
+    }
+
+    fun setVibrateOnAnswer(enabled: Boolean) {
+        viewModelScope.launch { prefs.setVibrateOnAnswer(enabled) }
+    }
+
+    fun setAutoSpeakerForRecord(enabled: Boolean) {
+        viewModelScope.launch { prefs.setAutoSpeakerForRecord(enabled) }
+    }
+
+    fun toggleCategoryLock(categoryPath: String) {
+        if (categoryPath.isBlank()) return
+        viewModelScope.launch {
+            val currentlyLocked = lockedCategories.value.contains(categoryPath)
+            prefs.toggleCategoryLock(categoryPath)
+            _statusMessage.value = if (currentlyLocked) {
+                "تم إلغاء قفل فئة: $categoryPath"
+            } else {
+                "تم قفل فئة ($categoryPath) بالبصمة بنجاح"
+            }
+        }
+    }
+
+    fun markCategoryUnlockedForSession(categoryPath: String) {
+        val next = _sessionUnlockedCategories.value.toMutableSet()
+        next.add(categoryPath)
+        _sessionUnlockedCategories.value = next
+    }
+
+    fun addWhatsAppTemplate(text: String) {
+        val clean = text.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch {
+            prefs.saveWhatsAppTemplates((whatsappTemplates.value + clean).distinct())
+            _statusMessage.value = "تمت إضافة قالب واتساب"
+        }
+    }
+
+    fun removeWhatsAppTemplate(text: String) {
+        viewModelScope.launch {
+            val remaining = whatsappTemplates.value.filterNot { it == text }
+            prefs.saveWhatsAppTemplates(remaining.ifEmpty { SyncPrefsDataStore.DEFAULT_WHATSAPP_TEMPLATES })
+        }
+    }
+
+    fun dismissPostCallSummary() {
+        RabtaInCallService.clearLastEndedCallSummary()
+    }
+
+    fun scheduleFollowUpReminder(
+        contactName: String,
+        phone: String,
+        contactId: String?,
+        delayMinutes: Int?,
+        note: String = "",
+    ) {
+        val label = contactName.ifBlank { phone }
+        val triggerEpoch = if (delayMinutes == null) {
+            FollowUpReminderScheduler.scheduleTomorrowMorning(
+                context = appContext,
+                contactName = label,
+                phone = phone,
+                contactId = contactId,
+                hourOfDay = 10,
+                note = note,
+            )
+        } else {
+            FollowUpReminderScheduler.scheduleAfterMinutes(
+                context = appContext,
+                contactName = label,
+                phone = phone,
+                contactId = contactId,
+                delayMinutes = delayMinutes,
+                note = note,
+            )
+        }
+        val fmt = SimpleDateFormat("dd/MM hh:mm a", Locale.getDefault())
+        _statusMessage.value = "تم جدولة تذكير لمتابعة $label (${fmt.format(Date(triggerEpoch))})"
+    }
+
+    fun openContactByPhoneOrId(contactId: String?, phone: String?) {
+        viewModelScope.launch {
+            val matched = withContext(Dispatchers.IO) {
+                contactId?.let { contactDao.getById(it)?.toDomain() }
+                    ?: run {
+                        val key = PhoneUtils.phoneSearchKey(phone.orEmpty())
+                        if (key.length >= 4) contactDao.findByExactPhoneKey(key)?.toDomain() else null
+                    }
+            }
+            if (matched != null) {
+                _selectedContact.value = matched
+            }
+        }
+    }
+
+    fun launchWhatsAppQuick(phone: String, name: String, contactId: String?, prefillMessage: String? = null) {
+        val dummyOrReal = ContactRecord(
+            id = contactId ?: "quick_${phone.hashCode()}",
+            displayName = name.ifBlank { phone },
+            primaryPhone = phone,
+            phones = listOf(phone),
+        )
+        launchWhatsAppAndLog(dummyOrReal, phone, prefillMessage)
     }
 
     fun refreshRecordings() {

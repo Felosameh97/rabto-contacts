@@ -50,6 +50,7 @@ import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.NoteAdd
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -110,6 +111,7 @@ import coil.compose.AsyncImage
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.PaymentTemplate
+import com.example.telecom.CallRecorderManager
 import com.example.ui.theme.InstaPayPurple
 import com.example.ui.theme.TelegramBlue
 import com.example.ui.theme.WhatsAppGreen
@@ -121,6 +123,7 @@ import com.example.util.QrUtils
 import com.example.util.SimUtils
 import com.example.util.SystemIntents
 import com.example.util.VCardUtils
+import android.os.Build
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -325,11 +328,14 @@ fun ContactDetailBottomSheet(
     contactTranscripts: List<CallTranscriptRecord> = emptyList(),
     showPhoto: Boolean = true,
     preferredSimSlot: Int? = null,
+    whatsappTemplates: List<String> = emptyList(),
     onDismiss: () -> Unit,
     onToggleFavorite: (ContactRecord) -> Unit,
     onEdit: (ContactRecord) -> Unit,
     onDelete: (ContactRecord) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
+    onWhatsAppWithTemplate: (ContactRecord, String, String) -> Unit = { c, p, _ -> onWhatsApp(c, p) },
+    onScheduleFollowUp: (ContactRecord, String, Int?) -> Unit = { _, _, _ -> },
     onToggleDeviceSync: (ContactRecord) -> Unit,
     onAddPaymentTemplate: (String, String) -> Unit,
     onUpdatePhoto: (ContactRecord, String?) -> Unit = { _, _ -> },
@@ -346,6 +352,9 @@ fun ContactDetailBottomSheet(
     var showMeezaQrDialog by remember { mutableStateOf(false) }
     var showAddPaymentDialog by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var waTemplatePhone by remember { mutableStateOf<String?>(null) }
+    var pendingFollowUpPhone by remember { mutableStateOf<String?>(null) }
+    var pendingFollowUpMinutes by remember { mutableStateOf<Int?>(null) }
     var paymentAmount by remember { mutableStateOf("") }
     var playingTranscriptId by remember { mutableStateOf<String?>(null) }
     var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
@@ -385,6 +394,28 @@ fun ContactDetailBottomSheet(
             SystemIntents.dialPhoneWithSimSlot(context, num, pendingCallSlot)
         }
         pendingCallPhone = ""
+    }
+
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) {
+        val phone = pendingFollowUpPhone
+        if (!phone.isNullOrBlank()) {
+            onScheduleFollowUp(contact, phone, pendingFollowUpMinutes)
+        }
+        pendingFollowUpPhone = null
+    }
+
+    fun triggerFollowUp(phone: String, delayMinutes: Int?) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingFollowUpPhone = phone
+            pendingFollowUpMinutes = delayMinutes
+            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            onScheduleFollowUp(contact, phone, delayMinutes)
+        }
     }
 
     fun placeCall(phone: String, slotIndex: Int?) {
@@ -568,6 +599,16 @@ fun ContactDetailBottomSheet(
                                         Spacer(Modifier.width(6.dp))
                                         Text(if (whatsAppInstalled) "واتساب" else "واتساب ويب")
                                     }
+                                    if (whatsappTemplates.isNotEmpty()) {
+                                        FilledTonalButton(
+                                            onClick = { waTemplatePhone = phone },
+                                            modifier = Modifier.testTag("detail_wa_template_btn"),
+                                        ) {
+                                            Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("رسالة جاهزة")
+                                        }
+                                    }
                                     FilledTonalButton(
                                         onClick = { SystemIntents.openTelegram(context, contact.telegramHandle ?: phone) },
                                         modifier = Modifier.testTag("detail_telegram_btn"),
@@ -580,6 +621,26 @@ fun ContactDetailBottomSheet(
                             }
                         }
                     }
+                }
+
+                // Follow-Up Snooze Quick Strip
+                val primaryTargetPhone = allPhones.first()
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        Icons.Rounded.NotificationsActive,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text("فكّرني:", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    AssistChip(onClick = { triggerFollowUp(primaryTargetPhone, 30) }, label = { Text("30د") })
+                    AssistChip(onClick = { triggerFollowUp(primaryTargetPhone, 60) }, label = { Text("ساعة") })
+                    AssistChip(onClick = { triggerFollowUp(primaryTargetPhone, 180) }, label = { Text("3 ساعات") })
+                    AssistChip(onClick = { triggerFollowUp(primaryTargetPhone, null) }, label = { Text("بكرة 10ص") })
                 }
             }
 
@@ -776,14 +837,17 @@ fun ContactDetailBottomSheet(
                                                 runCatching {
                                                     mediaPlayer?.stop()
                                                     mediaPlayer?.release()
-                                                    mediaPlayer = MediaPlayer().apply {
-                                                        setDataSource(audioFile.absolutePath)
-                                                        prepare()
-                                                        start()
-                                                        setOnCompletionListener { playingTranscriptId = null }
-                                                    }
-                                                    playingTranscriptId = rec.id
                                                 }
+                                                mediaPlayer = CallRecorderManager.playAudioFile(
+                                                    context = context,
+                                                    file = audioFile,
+                                                    onStart = { playingTranscriptId = rec.id },
+                                                    onComplete = { playingTranscriptId = null },
+                                                    onError = { msg ->
+                                                        playingTranscriptId = null
+                                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                                    },
+                                                )
                                             }
                                         },
                                         modifier = Modifier.size(40.dp),
@@ -989,6 +1053,45 @@ fun ContactDetailBottomSheet(
             onSave = { name, tpl ->
                 onAddPaymentTemplate(name, tpl)
                 showAddPaymentDialog = false
+            },
+        )
+    }
+
+    if (waTemplatePhone != null) {
+        val targetWaPhone = waTemplatePhone!!
+        AlertDialog(
+            onDismissRequest = { waTemplatePhone = null },
+            title = { Text("اختر رسالة واتساب جاهزة") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    whatsappTemplates.forEach { tpl ->
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onWhatsAppWithTemplate(contact, targetWaPhone, tpl)
+                                    waTemplatePhone = null
+                                },
+                        ) {
+                            Text(
+                                text = tpl,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(12.dp),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onWhatsApp(contact, targetWaPhone)
+                    waTemplatePhone = null
+                }) { Text("فتح محادثة فارغة") }
+            },
+            dismissButton = {
+                TextButton(onClick = { waTemplatePhone = null }) { Text("إلغاء") }
             },
         )
     }

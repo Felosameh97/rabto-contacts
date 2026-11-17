@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
 import androidx.compose.material.icons.rounded.Dialpad
@@ -37,9 +38,11 @@ import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -55,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -68,6 +72,7 @@ import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.RabtaContactsTheme
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.PhoneUtils
 import java.io.File
 
 class InCallActivity : ComponentActivity() {
@@ -79,10 +84,15 @@ class InCallActivity : ComponentActivity() {
             val themeMode by prefs.themeModeFlow.collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
             val palette by prefs.paletteFlow.collectAsStateWithLifecycle(initialValue = CalmPalette.SLATE)
             val usePhotoBackground by prefs.callPhotoBackgroundFlow.collectAsStateWithLifecycle(initialValue = true)
+            val waTemplates by prefs.whatsappTemplatesFlow.collectAsStateWithLifecycle(
+                initialValue = SyncPrefsDataStore.DEFAULT_WHATSAPP_TEMPLATES
+            )
 
             RabtaContactsTheme(themeMode = themeMode, palette = palette) {
                 InCallScreen(
                     usePhotoBackground = usePhotoBackground,
+                    busyReplyMessage = waTemplates.getOrNull(1)
+                        ?: "أنا في اجتماع/مشغول حالياً، هكلمك أول ما أخلص 👍",
                     onFinish = { finish() },
                 )
             }
@@ -93,6 +103,7 @@ class InCallActivity : ComponentActivity() {
 @Composable
 private fun InCallScreen(
     usePhotoBackground: Boolean,
+    busyReplyMessage: String,
     onFinish: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -216,22 +227,39 @@ private fun InCallScreen(
                     val categoryOrDistrict = listOfNotNull(
                         state.matchedContact?.categoryPaths?.firstOrNull(),
                         state.matchedContact?.district,
+                        state.callerInsight,
                     ).joinToString(" • ")
                     if (categoryOrDistrict.isNotBlank()) {
                         AssistChip(onClick = {}, label = { Text(categoryOrDistrict) })
                     }
 
                     state.recordingStatusNote?.let { note ->
+                        val activeRecLabel = if (state.isRecording && state.recordingSourceName.isNotBlank()) {
+                            "$note (${state.recordingSourceName})"
+                        } else note
                         Surface(
                             shape = RoundedCornerShape(12.dp),
                             color = if (state.isRecording || state.isLiveTranscribing) ErrorRed.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceContainerLow,
                         ) {
-                            Text(
-                                text = note,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (state.isRecording || state.isLiveTranscribing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            Column(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            )
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = activeRecLabel,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (state.isRecording || state.isLiveTranscribing) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                if (state.isRecording) {
+                                    val level = (state.recordingAmplitude / 14000f).coerceIn(0.05f, 1f)
+                                    LinearProgressIndicator(
+                                        progress = { level },
+                                        modifier = Modifier.width(150.dp).height(4.dp),
+                                        color = WhatsAppGreen,
+                                    )
+                                }
+                            }
                         }
                     }
 
@@ -277,7 +305,7 @@ private fun InCallScreen(
 
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
                     modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
                 ) {
                     Row(
@@ -345,6 +373,17 @@ private fun InCallScreen(
                     }
 
                     if (state.callState == Call.STATE_RINGING) {
+                        if (state.phoneNumber.isNotBlank() && !PhoneUtils.isUssdOrShortCode(state.phoneNumber)) {
+                            FilledTonalButton(
+                                onClick = { RabtaInCallService.rejectWithWhatsApp(context, busyReplyMessage) },
+                                shape = RoundedCornerShape(22.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = null, tint = WhatsAppGreen, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("رفض + إرسال رسالة واتساب جاهزة")
+                            }
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -383,6 +422,29 @@ private fun InCallScreen(
                             Text("إنهاء المكالمة")
                         }
                     }
+                }
+            }
+
+            // Cheek-Touch Guard scrim when ear proximity sensor triggers (in case hardware WakeLock is delayed)
+            if (state.isNearEar && !state.isSpeaker && state.callState != Call.STATE_RINGING) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.94f))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "الشاشة محمية أثناء وضع الهاتف على الأذن",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.White.copy(alpha = 0.6f),
+                    )
                 }
             }
         }

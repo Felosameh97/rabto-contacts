@@ -7,12 +7,14 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.example.telecom.RecordingSourceMode
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
 import com.example.util.SimPreference
@@ -133,6 +135,11 @@ class SyncPrefsDataStore(private val context: Context) {
     private val strictIsolationKey = booleanPreferencesKey("strict_phonebook_isolation")
     private val autoTranscribeKey = booleanPreferencesKey("auto_transcribe_calls")
     private val simPrefKey = stringPreferencesKey("sim_preference")
+    private val recordingSourceKey = stringPreferencesKey("recording_source_mode")
+    private val vibrateOnAnswerKey = booleanPreferencesKey("vibrate_on_answer")
+    private val autoSpeakerRecordKey = booleanPreferencesKey("auto_speaker_for_record")
+    private val lockedCategoriesKey = stringSetPreferencesKey("locked_categories")
+    private val whatsappTemplatesKey = stringPreferencesKey("whatsapp_quick_templates")
 
     val githubRepoFlow: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[githubRepoKey] ?: ""
@@ -181,6 +188,33 @@ class SyncPrefsDataStore(private val context: Context) {
             .getOrDefault(SimPreference.ASK_OR_BOTH)
     }
 
+    val recordingSourceFlow: Flow<RecordingSourceMode> = context.dataStore.data.map { prefs ->
+        runCatching { RecordingSourceMode.valueOf(prefs[recordingSourceKey] ?: RecordingSourceMode.SMART_AUTO.name) }
+            .getOrDefault(RecordingSourceMode.SMART_AUTO)
+    }
+
+    val vibrateOnAnswerFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[vibrateOnAnswerKey] ?: true
+    }
+
+    val autoSpeakerForRecordFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[autoSpeakerRecordKey] ?: false
+    }
+
+    val lockedCategoriesFlow: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        prefs[lockedCategoriesKey] ?: emptySet()
+    }
+
+    val whatsappTemplatesFlow: Flow<List<String>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[whatsappTemplatesKey]
+        if (raw.isNullOrBlank()) {
+            DEFAULT_WHATSAPP_TEMPLATES
+        } else {
+            raw.split(TEMPLATE_DELIM).map { it.trim() }.filter { it.isNotBlank() }
+                .ifEmpty { DEFAULT_WHATSAPP_TEMPLATES }
+        }
+    }
+
     suspend fun setGithubRepoSlug(slug: String) {
         context.dataStore.edit { it[githubRepoKey] = slug.trim() }
     }
@@ -223,5 +257,43 @@ class SyncPrefsDataStore(private val context: Context) {
 
     suspend fun setSimPreference(pref: SimPreference) {
         context.dataStore.edit { it[simPrefKey] = pref.name }
+    }
+
+    suspend fun setRecordingSourceMode(mode: RecordingSourceMode) {
+        context.dataStore.edit { it[recordingSourceKey] = mode.name }
+    }
+
+    suspend fun setVibrateOnAnswer(enabled: Boolean) {
+        context.dataStore.edit { it[vibrateOnAnswerKey] = enabled }
+    }
+
+    suspend fun setAutoSpeakerForRecord(enabled: Boolean) {
+        context.dataStore.edit { it[autoSpeakerRecordKey] = enabled }
+    }
+
+    suspend fun toggleCategoryLock(categoryPath: String) {
+        context.dataStore.edit { prefs ->
+            val current = (prefs[lockedCategoriesKey] ?: emptySet()).toMutableSet()
+            if (!current.add(categoryPath)) current.remove(categoryPath)
+            prefs[lockedCategoriesKey] = current
+        }
+    }
+
+    suspend fun saveWhatsAppTemplates(templates: List<String>) {
+        val cleaned = templates.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        context.dataStore.edit { prefs ->
+            prefs[whatsappTemplatesKey] = cleaned.joinToString(TEMPLATE_DELIM)
+        }
+    }
+
+    companion object {
+        private const val TEMPLATE_DELIM = "\u001F"
+        val DEFAULT_WHATSAPP_TEMPLATES = listOf(
+            "السلام عليكم، معاك بخصوص الشغل — متاح نتكلم؟",
+            "أنا مشغول/في اجتماع حالياً، هكلمك أول ما أخلص 👍",
+            "ممكن تبعتلي اللوكيشن أو التفاصيل هنا على واتساب؟",
+            "تمام، تم تأكيد الموعد وهكون على تواصل معاك إن شاء الله.",
+            "مساء الخير، ده رقمي للتواصل السريع في أي وقت.",
+        )
     }
 }

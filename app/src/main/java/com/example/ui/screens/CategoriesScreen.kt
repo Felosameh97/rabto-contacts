@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -27,6 +28,8 @@ import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.LockOpen
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -56,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import com.example.domain.model.CategorySummary
 import com.example.domain.model.ContactRecord
 import com.example.ui.components.ContactSummaryCard
+import com.example.util.BiometricVaultHelper
 import com.example.util.SystemIntents
 
 @Composable
@@ -67,6 +71,8 @@ fun CategoriesScreen(
     isBusy: Boolean,
     showContactPhotos: Boolean = true,
     preferredSimSlot: Int? = null,
+    lockedCategories: Set<String> = emptySet(),
+    sessionUnlockedCategories: Set<String> = emptySet(),
     onSelectPath: (String) -> Unit,
     onNavigateUp: () -> Unit,
     onCreateCategory: (String) -> Unit,
@@ -78,6 +84,8 @@ fun CategoriesScreen(
     onToggleBulk: (String) -> Unit,
     onClearBulk: () -> Unit,
     onShareExport: (Boolean) -> Unit,
+    onToggleCategoryLock: (String) -> Unit = {},
+    onUnlockCategorySession: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     var bulkMode by remember { mutableStateOf(false) }
@@ -115,6 +123,27 @@ fun CategoriesScreen(
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (currentPath.isNotEmpty()) {
+                            val isCurrentLocked = lockedCategories.contains(currentPath)
+                            IconButton(
+                                onClick = {
+                                    BiometricVaultHelper.authenticate(
+                                        context = context,
+                                        title = if (isCurrentLocked) "فك قفل الفئة بالبصمة" else "قفل الفئة بالبصمة",
+                                        subtitle = currentPath,
+                                        onSuccess = { onToggleCategoryLock(currentPath) },
+                                        onError = { msg -> Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() },
+                                    )
+                                },
+                                modifier = Modifier.testTag("cat_lock_toggle_btn"),
+                            ) {
+                                Icon(
+                                    imageVector = if (isCurrentLocked) Icons.Rounded.Lock else Icons.Rounded.LockOpen,
+                                    contentDescription = if (isCurrentLocked) "فئة محمية بالبصمة" else "قفل الفئة بالبصمة",
+                                    tint = if (isCurrentLocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
                         IconButton(onClick = { showNewCatDialog = true }, modifier = Modifier.testTag("cat_new_btn")) {
                             Icon(Icons.Rounded.CreateNewFolder, contentDescription = "فئة جديدة")
                         }
@@ -249,12 +278,29 @@ fun CategoriesScreen(
                     )
                 }
                 items(childCategories, key = { it.fullPath }) { cat ->
+                    val isLocked = lockedCategories.any { cat.fullPath == it || cat.fullPath.startsWith("$it > ") }
+                    val isUnlockedInSession = sessionUnlockedCategories.any { cat.fullPath == it || cat.fullPath.startsWith("$it > ") }
                     Card(
                         shape = RoundedCornerShape(16.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelectPath(cat.fullPath) }
+                            .clickable {
+                                if (isLocked && !isUnlockedInSession) {
+                                    BiometricVaultHelper.authenticate(
+                                        context = context,
+                                        title = "فئة محمية بالبصمة",
+                                        subtitle = "تحقق لفتح ${cat.name}",
+                                        onSuccess = {
+                                            onUnlockCategorySession(cat.fullPath)
+                                            onSelectPath(cat.fullPath)
+                                        },
+                                        onError = { msg -> Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() },
+                                    )
+                                } else {
+                                    onSelectPath(cat.fullPath)
+                                }
+                            }
                             .testTag("category_folder_${cat.name}"),
                     ) {
                         Row(
@@ -263,14 +309,15 @@ fun CategoriesScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             Icon(
-                                imageVector = Icons.Rounded.Folder,
+                                imageVector = if (isLocked && !isUnlockedInSession) Icons.Rounded.Lock else Icons.Rounded.Folder,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
+                                tint = if (isLocked && !isUnlockedInSession) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(28.dp),
                             )
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(cat.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                                 val sub = buildList {
+                                    if (isLocked && !isUnlockedInSession) add("مقفولة بالبصمة")
                                     add("${cat.contactCount} رقم")
                                     if (cat.childCount > 0) add("${cat.childCount} فئة فرعية")
                                 }.joinToString(" • ")

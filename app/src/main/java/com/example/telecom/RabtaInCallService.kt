@@ -8,8 +8,16 @@ import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.media.AudioManager
 import android.os.Build
+import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.InCallService
@@ -22,7 +30,9 @@ import com.example.data.local.CallTranscriptEntity
 import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
 import com.example.domain.model.ContactRecord
+import com.example.util.EgyptGeoLookup
 import com.example.util.PhoneUtils
+import com.example.util.SystemIntents
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
@@ -42,27 +52,46 @@ data class ActiveCallUiState(
     val callState: Int = Call.STATE_DISCONNECTED,
     val phoneNumber: String = "",
     val matchedContact: ContactRecord? = null,
+    val callerInsight: String? = null,
     val elapsedSec: Long = 0L,
     val isMuted: Boolean = false,
     val isSpeaker: Boolean = false,
     val isOnHold: Boolean = false,
+    val isNearEar: Boolean = false,
     val isRecording: Boolean = false,
+    val recordingAmplitude: Int = 0,
+    val recordingSourceName: String = "",
     val isLiveTranscribing: Boolean = false,
     val liveTranscriptText: String = "",
     val recordingStatusNote: String? = null,
 )
 
-class RabtaInCallService : InCallService() {
+data class PostCallSummary(
+    val phone: String,
+    val contactId: String?,
+    val contactName: String,
+    val durationSec: Long,
+    val hasRecording: Boolean,
+    val endedAtMs: Long,
+)
+
+class RabtaInCallService : InCallService(), SensorEventListener {
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var timerJob: Job? = null
     private var liveJob: Job? = null
+    private var amplitudeJob: Job? = null
     private var activeCall: Call? = null
     private var callStartTimeMs: Long = 0L
     private var callLoggedForCurrentCall: Boolean = false
+    private var didVibrateOnActive: Boolean = false
     private var lastSavedRecordingFile: File? = null
     private var speechTranscriber: LocalSpeechTranscriber? = null
     private var collectedLiveText: String = ""
+
+    private var sensorManager: SensorManager? = null
+    private var proximitySensor: Sensor? = null
+    private var proximityWakeLock: PowerManager.WakeLock? = null
 
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
@@ -74,6 +103,7 @@ class RabtaInCallService : InCallService() {
         super.onCreate()
         instance = this
         ensureCallNotificationChannel()
+        initProximityHardware()
         speechTranscriber = LocalSpeechTranscriber(applicationContext)
         liveJob = serviceScope.launch {
             speechTranscriber?.state?.collect { st ->
@@ -86,17 +116,92 @@ class RabtaInCallService : InCallService() {
                 )
             }
         }
+        amplitudeJob = serviceScope.launch {
+            launch {
+                CallRecorderManager.amplitudeFlow.collect { amp ->
+                    _uiState.value = _uiState.value.copy(recordingAmplitude = amp)
+                }
+            }
+            launch {
+                CallRecorderManager.activeSourceFlow.collect { src ->
+                    _uiState.value = _uiState.value.copy(recordingSourceName = src)
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
+        releaseProximityHardware()
         stopLiveTranscriptionInternal()
         stopRecordingInternal()
+        amplitudeJob?.cancel()
         liveJob?.cancel()
         timerJob?.cancel()
         serviceScope.cancel()
         if (instance === this) instance = null
         super.onDestroy()
     }
+
+    private fun initProximityHardware() {
+        runCatching {
+            sensorManager = getSystemService(SensorManager::class.java)
+            proximitySensor = sensorManager?.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+            val pm = getSystemService(PowerManager::class.java)
+            if (pm != null && pm.isWakeLockLevelSupported(PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK)) {
+                proximityWakeLock = pm.newWakeLock(
+                    PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+                    "FeloContacts:CallProximityLock",
+                ).apply {
+                    setReferenceCounted(false)
+                }
+            }
+        }
+    }
+
+    private fun updateProximityLockState(enable: Boolean) {
+        runCatching {
+            val sm = sensorManager
+            val sensor = proximitySensor
+            val wl = proximityWakeLock
+            if (enable && !_uiState.value.isSpeaker) {
+                if (sm != null && sensor != null) {
+                    sm.unregisterListener(this)
+                    sm.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+                }
+                if (wl != null && !wl.isHeld) {
+                    wl.acquire(60 * 60 * 1000L) // up to 60 min max guard
+                }
+            } else {
+                if (wl != null && wl.isHeld) {
+                    wl.release(PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY)
+                }
+                if (!enable) {
+                    sm?.unregisterListener(this)
+                    _uiState.value = _uiState.value.copy(isNearEar = false)
+                }
+            }
+        }
+    }
+
+    private fun releaseProximityHardware() {
+        runCatching {
+            sensorManager?.unregisterListener(this)
+            proximityWakeLock?.let { wl ->
+                if (wl.isHeld) wl.release(PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY)
+            }
+        }
+        _uiState.value = _uiState.value.copy(isNearEar = false)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        val ev = event ?: return
+        if (ev.sensor?.type != Sensor.TYPE_PROXIMITY) return
+        val maxRange = ev.sensor.maximumRange.coerceAtMost(5.0f)
+        val near = ev.values.firstOrNull()?.let { it < maxRange } ?: false
+        _uiState.value = _uiState.value.copy(isNearEar = near && !_uiState.value.isSpeaker)
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
@@ -108,15 +213,24 @@ class RabtaInCallService : InCallService() {
         val normalized = PhoneUtils.normalizePhone(rawNumber).ifBlank { rawNumber }
         callStartTimeMs = 0L
         callLoggedForCurrentCall = false
+        didVibrateOnActive = false
         lastSavedRecordingFile = null
         collectedLiveText = ""
         speechTranscriber?.clear()
 
+        val initialState = call.details?.state ?: Call.STATE_CONNECTING
+        val initialInsight = EgyptGeoLookup.inferCallerInsight(normalized)
+
         _uiState.value = ActiveCallUiState(
             hasActiveCall = true,
-            callState = call.details?.state ?: Call.STATE_CONNECTING,
+            callState = initialState,
             phoneNumber = normalized,
+            callerInsight = initialInsight,
         )
+
+        // Promote foreground type early so microphone capture is allowed throughout call
+        promoteForegroundMicrophoneIfPermitted()
+        updateProximityLockState(enable = initialState != Call.STATE_RINGING)
 
         serviceScope.launch(Dispatchers.IO) {
             val key = PhoneUtils.phoneSearchKey(normalized)
@@ -127,7 +241,10 @@ class RabtaInCallService : InCallService() {
                     ?.toDomain()
             } else null
 
-            _uiState.value = _uiState.value.copy(matchedContact = matched)
+            _uiState.value = _uiState.value.copy(
+                matchedContact = matched,
+                callerInsight = if (matched == null) initialInsight else null,
+            )
             postCallNotification(_uiState.value)
         }
 
@@ -140,6 +257,7 @@ class RabtaInCallService : InCallService() {
         call.unregisterCallback(callCallback)
         if (activeCall === call) {
             timerJob?.cancel()
+            releaseProximityHardware()
             stopLiveTranscriptionInternal()
             stopRecordingInternal()
             persistCompletedCallIfNeeded()
@@ -152,10 +270,31 @@ class RabtaInCallService : InCallService() {
     override fun onCallAudioStateChanged(audioState: CallAudioState?) {
         super.onCallAudioStateChanged(audioState)
         audioState ?: return
+        val speakerOn = (audioState.route and CallAudioState.ROUTE_SPEAKER) != 0
         _uiState.value = _uiState.value.copy(
             isMuted = audioState.isMuted,
-            isSpeaker = (audioState.route and CallAudioState.ROUTE_SPEAKER) != 0,
+            isSpeaker = speakerOn,
         )
+        if (_uiState.value.hasActiveCall && _uiState.value.callState != Call.STATE_DISCONNECTED) {
+            updateProximityLockState(enable = !speakerOn && _uiState.value.callState != Call.STATE_RINGING)
+        }
+    }
+
+    private fun vibrateBrieflyOnAnswer() {
+        runCatching {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                getSystemService(VibratorManager::class.java)?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            } ?: return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator.vibrate(VibrationEffect.createOneShot(75L, VibrationEffect.DEFAULT_AMPLITUDE))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(75L)
+            }
+        }
     }
 
     private fun updateCallState(call: Call, state: Int) {
@@ -164,13 +303,24 @@ class RabtaInCallService : InCallService() {
             isOnHold = state == Call.STATE_HOLDING,
         )
         postCallNotification(_uiState.value)
+        updateProximityLockState(enable = state != Call.STATE_RINGING && state != Call.STATE_DISCONNECTED && !_uiState.value.isSpeaker)
 
         if (state == Call.STATE_ACTIVE) {
             if (callStartTimeMs == 0L) {
                 callStartTimeMs = System.currentTimeMillis()
                 startDurationTimer()
                 serviceScope.launch {
-                    val autoRecord = SyncPrefsDataStore(applicationContext).autoRecordCallsFlow.firstOrNull() ?: true
+                    val prefs = SyncPrefsDataStore(applicationContext)
+                    val vibrateEnabled = prefs.vibrateOnAnswerFlow.firstOrNull() ?: true
+                    if (vibrateEnabled && !didVibrateOnActive) {
+                        didVibrateOnActive = true
+                        vibrateBrieflyOnAnswer()
+                    }
+                    val autoSpeaker = prefs.autoSpeakerForRecordFlow.firstOrNull() ?: false
+                    if (autoSpeaker && !_uiState.value.isSpeaker) {
+                        toggleSpeaker()
+                    }
+                    val autoRecord = prefs.autoRecordCallsFlow.firstOrNull() ?: true
                     if (autoRecord && !_uiState.value.isRecording && !_uiState.value.isLiveTranscribing) {
                         startRecordingInternal()
                     }
@@ -178,6 +328,7 @@ class RabtaInCallService : InCallService() {
             }
         } else if (state == Call.STATE_DISCONNECTED) {
             timerJob?.cancel()
+            releaseProximityHardware()
             stopLiveTranscriptionInternal()
             stopRecordingInternal()
             persistCompletedCallIfNeeded()
@@ -215,19 +366,23 @@ class RabtaInCallService : InCallService() {
         val label = _uiState.value.matchedContact?.displayName
             ?.ifBlank { _uiState.value.phoneNumber }
             ?: _uiState.value.phoneNumber
-        CallRecorderManager.startRecording(applicationContext, label)
-            .onSuccess {
-                _uiState.value = _uiState.value.copy(
-                    isRecording = true,
-                    recordingStatusNote = "جاري تسجيل المكالمة (.m4a)",
-                )
-            }
-            .onFailure { err ->
-                _uiState.value = _uiState.value.copy(
-                    isRecording = false,
-                    recordingStatusNote = err.localizedMessage ?: "تعذر التسجيل",
-                )
-            }
+        serviceScope.launch {
+            val mode = SyncPrefsDataStore(applicationContext).recordingSourceFlow.firstOrNull()
+                ?: RecordingSourceMode.SMART_AUTO
+            CallRecorderManager.startRecording(applicationContext, label, sourceMode = mode)
+                .onSuccess {
+                    _uiState.value = _uiState.value.copy(
+                        isRecording = true,
+                        recordingStatusNote = "جاري تسجيل المكالمة (.m4a)",
+                    )
+                }
+                .onFailure { err ->
+                    _uiState.value = _uiState.value.copy(
+                        isRecording = false,
+                        recordingStatusNote = err.localizedMessage ?: "تعذر التسجيل",
+                    )
+                }
+        }
     }
 
     private fun stopRecordingInternal() {
@@ -238,6 +393,7 @@ class RabtaInCallService : InCallService() {
             }
             _uiState.value = _uiState.value.copy(
                 isRecording = false,
+                recordingAmplitude = 0,
                 recordingStatusNote = if (saved != null) "تم حفظ التسجيل: ${saved.name}" else null,
             )
         }
@@ -298,7 +454,7 @@ class RabtaInCallService : InCallService() {
                 contactName = contactName,
                 audioFilePath = audioFile?.absolutePath.orEmpty(),
                 transcript = localAnalysis.transcript,
-                highlightsJoined = localAnalysis.highlights.joinToString("\n"),
+                highlightsJoined = localAnalysis.highlights.joinToString("\u001F"),
                 extractedNotes = localAnalysis.extractedNotes,
                 suggestedEventTitle = localAnalysis.eventTitle,
                 suggestedEventDateIso = localAnalysis.eventDateIso,
@@ -319,6 +475,18 @@ class RabtaInCallService : InCallService() {
                 status = if (audioFile != null && audioFile.exists() && audioFile.length() > 256L) "PENDING" else "NO_AUDIO",
             )
         }
+
+        if (snapshot.phoneNumber.isNotBlank()) {
+            _lastEndedCallSummary.value = PostCallSummary(
+                phone = snapshot.phoneNumber,
+                contactId = contactId,
+                contactName = contactName,
+                durationSec = duration,
+                hasRecording = audioFile != null && audioFile.exists() && audioFile.length() > 256L,
+                endedAtMs = System.currentTimeMillis(),
+            )
+        }
+
         serviceScope.launch(Dispatchers.IO) {
             runCatching {
                 RabtaDatabase.getInstance(applicationContext).callTranscriptDao().upsert(entry)
@@ -401,6 +569,13 @@ class RabtaInCallService : InCallService() {
         private val _uiState = MutableStateFlow(ActiveCallUiState())
         val uiState = _uiState.asStateFlow()
 
+        private val _lastEndedCallSummary = MutableStateFlow<PostCallSummary?>(null)
+        val lastEndedCallSummary = _lastEndedCallSummary.asStateFlow()
+
+        fun clearLastEndedCallSummary() {
+            _lastEndedCallSummary.value = null
+        }
+
         fun isDefaultDialer(context: Context): Boolean {
             return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val rm = context.getSystemService(RoleManager::class.java)
@@ -438,6 +613,17 @@ class RabtaInCallService : InCallService() {
             }
         }
 
+        fun rejectWithWhatsApp(context: Context, busyMessage: String) {
+            val phone = _uiState.value.phoneNumber
+            val call = instance?.activeCall
+            if (call?.details?.state == Call.STATE_RINGING) {
+                runCatching { call.reject(false, null) }
+            }
+            if (phone.isNotBlank() && !PhoneUtils.isUssdOrShortCode(phone)) {
+                SystemIntents.openWhatsApp(context, phone, busyMessage)
+            }
+        }
+
         fun toggleMute() {
             val svc = instance ?: return
             val next = !_uiState.value.isMuted
@@ -454,6 +640,7 @@ class RabtaInCallService : InCallService() {
             @Suppress("DEPRECATION")
             runCatching { am?.isSpeakerphoneOn = next }
             _uiState.value = _uiState.value.copy(isSpeaker = next)
+            svc.updateProximityLockState(enable = !next && _uiState.value.callState != Call.STATE_RINGING)
         }
 
         fun toggleHold() {

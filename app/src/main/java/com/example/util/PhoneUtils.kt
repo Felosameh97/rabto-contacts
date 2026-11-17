@@ -198,4 +198,20 @@ object EgyptGeoLookup {
             else -> null
         }
     }
+
+    /**
+     * Infers carrier or governorate/country badge for unknown callers & call log rows.
+     */
+    fun inferCallerInsight(phone: String): String? {
+        if (phone.isBlank() || PhoneUtils.isUssdOrShortCode(phone)) return null
+        inferLocationFromPhone(phone)?.let { return it.key }
+        val local = PhoneUtils.toLocalEgyptianPhone(phone)
+        return when {
+            local.startsWith("010") && local.length == 11 -> "فودافون مصر"
+            local.startsWith("011") && local.length == 11 -> "إي آند (اتصالات)"
+            local.startsWith("012") && local.length == 11 -> "أورنج مصر"
+            local.startsWith("015") && local.length == 11 -> "وي (WE)"
+            else -> null
+        }
+    }
 }

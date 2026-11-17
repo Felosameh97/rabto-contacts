@@ -82,6 +82,7 @@ import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.RabtaContactsTheme
 import com.example.ui.theme.ThemeMode
 import com.example.ui.viewmodel.RabtaViewModel
+import com.example.util.FollowUpReminderScheduler
 import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
 import com.example.widget.RabtaWidget
@@ -102,6 +103,8 @@ class MainActivity : ComponentActivity() {
     private var requestedDialDigits by mutableStateOf<String?>(null)
     private var requestedOpenDialpad by mutableStateOf(false)
     private var requestedOpenAi by mutableStateOf(false)
+    private var requestedFollowUpContactId by mutableStateOf<String?>(null)
+    private var requestedFollowUpPhone by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,12 +125,16 @@ class MainActivity : ComponentActivity() {
                     requestedDialDigits = requestedDialDigits,
                     requestedOpenDialpad = requestedOpenDialpad,
                     requestedOpenAi = requestedOpenAi,
+                    requestedFollowUpContactId = requestedFollowUpContactId,
+                    requestedFollowUpPhone = requestedFollowUpPhone,
                     onConsumeIncoming = {
                         incomingShareText = null
                         incomingVCardText = null
                         requestedDialDigits = null
                         requestedOpenDialpad = false
                         requestedOpenAi = false
+                        requestedFollowUpContactId = null
+                        requestedFollowUpPhone = null
                     },
                 )
             }
@@ -146,6 +153,10 @@ class MainActivity : ComponentActivity() {
     private fun parseIncomingIntent(intent: Intent?) {
         if (intent == null) return
         when (intent.action) {
+            FollowUpReminderScheduler.ACTION_FOLLOWUP_CONTACT -> {
+                requestedFollowUpContactId = intent.getStringExtra(FollowUpReminderScheduler.EXTRA_CONTACT_ID)
+                requestedFollowUpPhone = intent.getStringExtra(FollowUpReminderScheduler.EXTRA_PHONE)
+            }
             RabtaWidget.ACTION_OPEN_DIALPAD -> {
                 requestedOpenDialpad = true
             }
@@ -188,6 +199,8 @@ private fun RabtaRootApp(
     requestedDialDigits: String?,
     requestedOpenDialpad: Boolean,
     requestedOpenAi: Boolean,
+    requestedFollowUpContactId: String?,
+    requestedFollowUpPhone: String?,
     onConsumeIncoming: () -> Unit,
     auth: FirebaseAuth = Firebase.auth,
 ) {
@@ -204,6 +217,8 @@ private fun RabtaRootApp(
             requestedDialDigits = requestedDialDigits,
             requestedOpenDialpad = requestedOpenDialpad,
             requestedOpenAi = requestedOpenAi,
+            requestedFollowUpContactId = requestedFollowUpContactId,
+            requestedFollowUpPhone = requestedFollowUpPhone,
             onConsumeIncoming = onConsumeIncoming,
             onSignOut = { auth.signOut() },
         )
@@ -219,6 +234,8 @@ private fun AuthenticatedMainScreen(
     requestedDialDigits: String?,
     requestedOpenDialpad: Boolean,
     requestedOpenAi: Boolean,
+    requestedFollowUpContactId: String?,
+    requestedFollowUpPhone: String?,
     onConsumeIncoming: () -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -288,6 +305,13 @@ private fun AuthenticatedMainScreen(
     val autoTranscribeCalls by viewModel.autoTranscribeCalls.collectAsStateWithLifecycle()
     val simPreference by viewModel.simPreference.collectAsStateWithLifecycle()
     val preferredSimSlot by viewModel.preferredSimSlot.collectAsStateWithLifecycle()
+    val recordingSourceMode by viewModel.recordingSourceMode.collectAsStateWithLifecycle()
+    val vibrateOnAnswer by viewModel.vibrateOnAnswer.collectAsStateWithLifecycle()
+    val autoSpeakerForRecord by viewModel.autoSpeakerForRecord.collectAsStateWithLifecycle()
+    val lockedCategories by viewModel.lockedCategories.collectAsStateWithLifecycle()
+    val sessionUnlockedCategories by viewModel.sessionUnlockedCategories.collectAsStateWithLifecycle()
+    val whatsappTemplates by viewModel.whatsappTemplates.collectAsStateWithLifecycle()
+    val postCallSummary by viewModel.postCallSummary.collectAsStateWithLifecycle()
     val aiUiState by viewModel.aiUiState.collectAsStateWithLifecycle()
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val statusMsg by viewModel.statusMessage.collectAsStateWithLifecycle()
@@ -313,9 +337,23 @@ private fun AuthenticatedMainScreen(
         }
     }
 
-    LaunchedEffect(incomingShareText, incomingVCardText, requestedOpenDialpad, requestedOpenAi, requestedDialDigits) {
+    LaunchedEffect(
+        incomingShareText,
+        incomingVCardText,
+        requestedOpenDialpad,
+        requestedOpenAi,
+        requestedDialDigits,
+        requestedFollowUpContactId,
+        requestedFollowUpPhone,
+    ) {
         if (incomingShareText != null || incomingVCardText != null) {
             viewModel.handleIncomingShareOrDeepLink(incomingShareText, incomingVCardText)
+            onConsumeIncoming()
+        } else if (requestedFollowUpContactId != null || !requestedFollowUpPhone.isNullOrBlank()) {
+            viewModel.openContactByPhoneOrId(requestedFollowUpContactId, requestedFollowUpPhone)
+            if (!requestedFollowUpPhone.isNullOrBlank()) {
+                openIntegratedKeypad(requestedFollowUpPhone)
+            }
             onConsumeIncoming()
         } else if (requestedOpenDialpad) {
             openIntegratedKeypad(requestedDialDigits.orEmpty())
@@ -463,6 +501,8 @@ private fun AuthenticatedMainScreen(
                                 dialHistory = dialHistory,
                                 recentlyDeletedHistory = recentlyDeletedDial,
                                 paymentTemplates = paymentTemplates,
+                                postCallSummary = postCallSummary,
+                                whatsappTemplates = whatsappTemplates,
                                 onSetDialpadExpanded = { expanded -> dialpadExpanded = expanded },
                                 onDialpadQueryChange = viewModel::searchForDialpad,
                                 onRecordDial = viewModel::recordDialHistoryDraft,
@@ -477,6 +517,11 @@ private fun AuthenticatedMainScreen(
                                 onSearchQueryChange = viewModel::updateSearchQuery,
                                 onOpenContact = viewModel::openContact,
                                 onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
+                                onWhatsAppQuick = viewModel::launchWhatsAppQuick,
+                                onScheduleFollowUpQuick = { name, phone, cid, mins ->
+                                    viewModel.scheduleFollowUpReminder(name, phone, cid, mins)
+                                },
+                                onDismissPostCallSummary = viewModel::dismissPostCallSummary,
                                 onAddContact = {
                                     editingContact = null
                                     editorCategorySeed = ""
@@ -505,6 +550,8 @@ private fun AuthenticatedMainScreen(
                                 isBusy = isBusy,
                                 showContactPhotos = showContactPhotos,
                                 preferredSimSlot = preferredSimSlot,
+                                lockedCategories = lockedCategories,
+                                sessionUnlockedCategories = sessionUnlockedCategories,
                                 onSelectPath = viewModel::loadCategoryLevel,
                                 onNavigateUp = viewModel::navigateCategoryUp,
                                 onCreateCategory = viewModel::createCategoryPath,
@@ -523,6 +570,8 @@ private fun AuthenticatedMainScreen(
                                 onToggleBulk = viewModel::toggleBulkSelection,
                                 onClearBulk = viewModel::clearBulkSelection,
                                 onShareExport = viewModel::shareBulkOrCategory,
+                                onToggleCategoryLock = viewModel::toggleCategoryLock,
+                                onUnlockCategorySession = viewModel::markCategoryUnlockedForSession,
                             )
                         }
                         composable<RouteTools> {
@@ -545,6 +594,10 @@ private fun AuthenticatedMainScreen(
                                 autoTranscribeCalls = autoTranscribeCalls,
                                 simPreference = simPreference,
                                 callTranscripts = callTranscripts,
+                                recordingSourceMode = recordingSourceMode,
+                                vibrateOnAnswer = vibrateOnAnswer,
+                                autoSpeakerForRecord = autoSpeakerForRecord,
+                                whatsappTemplates = whatsappTemplates,
                                 onSetThemeMode = viewModel::setThemeMode,
                                 onSetCalmPalette = viewModel::setCalmPalette,
                                 onSetAutoRecordCalls = viewModel::setAutoRecordCalls,
@@ -553,6 +606,12 @@ private fun AuthenticatedMainScreen(
                                 onSetStrictPhonebookIsolation = viewModel::setStrictPhonebookIsolation,
                                 onSetAutoTranscribeCalls = viewModel::setAutoTranscribeCalls,
                                 onSetSimPreference = viewModel::setSimPreference,
+                                onSetRecordingSourceMode = viewModel::setRecordingSourceMode,
+                                onSetVibrateOnAnswer = viewModel::setVibrateOnAnswer,
+                                onSetAutoSpeakerForRecord = viewModel::setAutoSpeakerForRecord,
+                                onAddWhatsAppTemplate = viewModel::addWhatsAppTemplate,
+                                onRemoveWhatsAppTemplate = viewModel::removeWhatsAppTemplate,
+                                onRefreshRecordings = viewModel::refreshRecordings,
                                 onDeleteRecording = viewModel::deleteRecording,
                                 onTranscribeRecording = viewModel::transcribeRecordingItem,
                                 onOpenLiveTranscriber = { showLiveTranscriber = true },
@@ -603,6 +662,7 @@ private fun AuthenticatedMainScreen(
             contactTranscripts = contactTranscripts,
             showPhoto = showContactPhotos,
             preferredSimSlot = preferredSimSlot,
+            whatsappTemplates = whatsappTemplates,
             onDismiss = viewModel::closeContact,
             onToggleFavorite = viewModel::toggleFavorite,
             onEdit = { toEdit ->
@@ -612,6 +672,10 @@ private fun AuthenticatedMainScreen(
             },
             onDelete = viewModel::deleteContact,
             onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
+            onWhatsAppWithTemplate = { c, p, tpl -> viewModel.launchWhatsAppAndLog(c, p, tpl) },
+            onScheduleFollowUp = { c, phone, mins ->
+                viewModel.scheduleFollowUpReminder(c.displayName, phone, c.id, mins)
+            },
             onToggleDeviceSync = viewModel::toggleDeviceContactSync,
             onAddPaymentTemplate = viewModel::savePaymentTemplate,
             onUpdatePhoto = viewModel::updateContactPhoto,
