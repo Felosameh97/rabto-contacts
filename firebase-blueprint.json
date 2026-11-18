@@ -36,8 +36,13 @@
         "longitude": { "type": "number", "description": "Optional longitude coordinate for map pins." },
         "telegramHandle": { "type": "string", "description": "Optional Telegram username or phone." },
         "website": { "type": "string", "description": "Optional website URL." },
-        "syncedToDevice": { "type": "boolean", "description": "Whether synced selectively to Android device contacts." },
+        "syncedToDevice": { "type": "boolean", "description": "Always false in sandbox isolation mode." },
         "isFavorite": { "type": "boolean", "description": "Pinned to quick access." },
+        "avatarColorSeed": { "type": "integer", "description": "Deterministic avatar pastel color seed." },
+        "muted": { "type": "boolean", "description": "Whether notifications for this contact are muted." },
+        "blocked": { "type": "boolean", "description": "Whether incoming calls from this contact are blocked." },
+        "lastContactedEpochMs": { "type": "integer", "description": "Epoch ms of most recent call or interaction." },
+        "clientUpdatedAtMs": { "type": "integer", "description": "Client monotonic timestamp for two-way conflict resolution." },
         "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
       },
@@ -85,6 +90,59 @@
         "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
       },
       "required": ["name", "urlTemplate", "isDefault", "createdAt", "updatedAt"]
+    },
+    "CallLogRecord": {
+      "title": "CallLogRecord",
+      "description": "User-scoped call history log synced between local Room and Firestore.",
+      "type": "object",
+      "properties": {
+        "contactId": { "type": "string", "description": "Optional matched sandbox contact ID." },
+        "phoneNumber": { "type": "string", "description": "Dialed or received phone number." },
+        "cachedName": { "type": "string", "description": "Cached contact name at time of call." },
+        "callType": { "type": "integer", "description": "Android CallLog call type (1=Incoming, 2=Outgoing, 3=Missed)." },
+        "simSlot": { "type": "integer", "description": "Optional dual-SIM slot index (0 or 1)." },
+        "timestampMs": { "type": "integer", "description": "Call start epoch milliseconds." },
+        "durationSec": { "type": "integer", "description": "Call duration in seconds." },
+        "transcriptId": { "type": "string", "description": "Optional linked transcript ID." },
+        "hasRecording": { "type": "boolean", "description": "Whether a local audio recording exists." },
+        "notes": { "type": "string", "description": "Short call summary or post-call note." },
+        "clientUpdatedAtMs": { "type": "integer", "description": "Client update timestamp for sync resolution." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["phoneNumber", "callType", "timestampMs", "durationSec", "hasRecording", "clientUpdatedAtMs", "createdAt", "updatedAt"]
+    },
+    "CallTranscriptRecord": {
+      "title": "CallTranscriptRecord",
+      "description": "Call recording metadata, full transcript, 3-bullet summary, timed segments, and extracted action items.",
+      "type": "object",
+      "properties": {
+        "contactId": { "type": "string", "description": "Optional linked sandbox contact ID." },
+        "phone": { "type": "string", "description": "Phone number associated with the call." },
+        "contactName": { "type": "string", "description": "Display name at recording time." },
+        "audioFileName": { "type": "string", "description": "Filename cached locally in private app storage." },
+        "audioSizeBytes": { "type": "integer", "description": "Local audio file size in bytes." },
+        "timestampMs": { "type": "integer", "description": "Call timestamp epoch milliseconds." },
+        "durationSec": { "type": "integer", "description": "Call duration in seconds." },
+        "transcript": { "type": "string", "description": "Full call transcript text." },
+        "highlights": { "type": "array", "description": "Key extracted highlights." },
+        "summaryBullets": { "type": "array", "description": "3 concise AI summary bullet points." },
+        "oneLineSummary": { "type": "string", "description": "One-line pre-call context summary." },
+        "segmentsJson": { "type": "string", "description": "Serialized timed speaker transcript segments JSON." },
+        "actionItemsJson": { "type": "string", "description": "Serialized action items JSON." },
+        "extractedNotes": { "type": "string", "description": "Organized post-call notes." },
+        "suggestedEventTitle": { "type": "string", "description": "Suggested calendar follow-up event title." },
+        "suggestedEventDateIso": { "type": "string", "description": "Suggested calendar follow-up ISO date." },
+        "suggestedEventEpochMs": { "type": "integer", "description": "Suggested calendar follow-up epoch ms." },
+        "suggestedCategory": { "type": "string", "description": "Suggested category path." },
+        "eventAdded": { "type": "boolean", "description": "Whether calendar event was added." },
+        "notesSaved": { "type": "boolean", "description": "Whether notes were saved to contact." },
+        "status": { "type": "string", "description": "Transcription status (PENDING, PROCESSING, READY, ERROR, NO_AUDIO)." },
+        "clientUpdatedAtMs": { "type": "integer", "description": "Client update timestamp for sync resolution." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Server creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Server update timestamp." }
+      },
+      "required": ["phone", "contactName", "audioSizeBytes", "timestampMs", "durationSec", "highlights", "summaryBullets", "eventAdded", "notesSaved", "status", "clientUpdatedAtMs", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -102,11 +160,19 @@
     },
     "/users/{userId}/whatsapp_logs/{logId}": {
       "schema": { "$ref": "#/entities/WhatsAppLog" },
-      "description": "User-scoped WhatsApp outreach logs for weekly selective phonebook sync."
+      "description": "User-scoped WhatsApp outreach logs."
     },
     "/users/{userId}/payment_templates/{templateId}": {
       "schema": { "$ref": "#/entities/PaymentTemplate" },
       "description": "User-scoped payment link concatenation templates."
+    },
+    "/users/{userId}/call_logs/{callLogId}": {
+      "schema": { "$ref": "#/entities/CallLogRecord" },
+      "description": "User-scoped offline-first call logs synced to cloud."
+    },
+    "/users/{userId}/call_transcripts/{transcriptId}": {
+      "schema": { "$ref": "#/entities/CallTranscriptRecord" },
+      "description": "User-scoped AI call transcripts and summaries synced to cloud."
     }
   }
 }

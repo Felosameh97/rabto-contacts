@@ -65,6 +65,11 @@ service cloud.firestore {
              (!('website' in data) || (data.website is string && data.website.size() <= 400)) &&
              data.syncedToDevice is bool &&
              data.isFavorite is bool &&
+             (!('avatarColorSeed' in data) || (data.avatarColorSeed is int && data.avatarColorSeed >= 0 && data.avatarColorSeed <= 1000)) &&
+             (!('muted' in data) || data.muted is bool) &&
+             (!('blocked' in data) || data.blocked is bool) &&
+             (!('lastContactedEpochMs' in data) || (data.lastContactedEpochMs is int && data.lastContactedEpochMs >= 0)) &&
+             (!('clientUpdatedAtMs' in data) || (data.clientUpdatedAtMs is int && data.clientUpdatedAtMs >= 0)) &&
              isValidTimestamp(data.createdAt) &&
              isValidTimestamp(data.updatedAt);
     }
@@ -97,6 +102,49 @@ service cloud.firestore {
              isValidTimestamp(data.updatedAt);
     }
 
+    function isValidCallLog(data) {
+      return (!('contactId' in data) || (data.contactId is string && data.contactId.size() >= 1 && data.contactId.size() <= 128)) &&
+             data.phoneNumber is string && data.phoneNumber.size() <= 60 &&
+             (!('cachedName' in data) || (data.cachedName is string && data.cachedName.size() <= 200)) &&
+             data.callType is int && data.callType >= 1 && data.callType <= 10 &&
+             (!('simSlot' in data) || (data.simSlot is int && data.simSlot >= 0 && data.simSlot <= 4)) &&
+             data.timestampMs is int && data.timestampMs >= 0 &&
+             data.durationSec is int && data.durationSec >= 0 &&
+             (!('transcriptId' in data) || (data.transcriptId is string && data.transcriptId.size() <= 128)) &&
+             data.hasRecording is bool &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000)) &&
+             data.clientUpdatedAtMs is int && data.clientUpdatedAtMs >= 0 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidCallTranscript(data) {
+      return (!('contactId' in data) || (data.contactId is string && data.contactId.size() >= 1 && data.contactId.size() <= 128)) &&
+             data.phone is string && data.phone.size() <= 60 &&
+             data.contactName is string && data.contactName.size() >= 1 && data.contactName.size() <= 200 &&
+             (!('audioFileName' in data) || (data.audioFileName is string && data.audioFileName.size() <= 200)) &&
+             data.audioSizeBytes is int && data.audioSizeBytes >= 0 &&
+             data.timestampMs is int && data.timestampMs >= 0 &&
+             data.durationSec is int && data.durationSec >= 0 &&
+             (!('transcript' in data) || (data.transcript is string && data.transcript.size() <= 20000)) &&
+             isValidStringList(data.highlights, 10) &&
+             isValidStringList(data.summaryBullets, 5) &&
+             (!('oneLineSummary' in data) || (data.oneLineSummary is string && data.oneLineSummary.size() <= 400)) &&
+             (!('segmentsJson' in data) || (data.segmentsJson is string && data.segmentsJson.size() <= 40000)) &&
+             (!('actionItemsJson' in data) || (data.actionItemsJson is string && data.actionItemsJson.size() <= 10000)) &&
+             (!('extractedNotes' in data) || (data.extractedNotes is string && data.extractedNotes.size() <= 4000)) &&
+             (!('suggestedEventTitle' in data) || (data.suggestedEventTitle is string && data.suggestedEventTitle.size() <= 200)) &&
+             (!('suggestedEventDateIso' in data) || (data.suggestedEventDateIso is string && data.suggestedEventDateIso.size() <= 60)) &&
+             (!('suggestedEventEpochMs' in data) || (data.suggestedEventEpochMs is int && data.suggestedEventEpochMs >= 0)) &&
+             (!('suggestedCategory' in data) || (data.suggestedCategory is string && data.suggestedCategory.size() <= 300)) &&
+             data.eventAdded is bool &&
+             data.notesSaved is bool &&
+             data.status in ['PENDING', 'PROCESSING', 'READY', 'ERROR', 'NO_AUDIO'] &&
+             data.clientUpdatedAtMs is int && data.clientUpdatedAtMs >= 0 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     match /users/{userId} {
       allow get: if isOwner(userId) && isValidId(userId);
       allow list: if false;
@@ -123,7 +171,7 @@ service cloud.firestore {
         allow create: if isOwner(userId) &&
                          isValidId(contactId) &&
                          incoming().keys().hasAll(['displayName', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
-                         incoming().keys().hasOnly(['displayName', 'nickname', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'tags', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['displayName', 'nickname', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'tags', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'avatarColorSeed', 'muted', 'blocked', 'lastContactedEpochMs', 'clientUpdatedAtMs', 'createdAt', 'updatedAt']) &&
                          isValidContact(incoming());
 
         allow update: if isOwner(userId) &&
@@ -131,7 +179,7 @@ service cloud.firestore {
                          isValidContact(incoming()) &&
                          incoming().createdAt == existing().createdAt &&
                          (
-                           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'tags', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'updatedAt']) ||
+                           incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'nickname', 'primaryPhone', 'phones', 'emails', 'categoryPaths', 'tags', 'organization', 'jobTitle', 'notes', 'address', 'district', 'latitude', 'longitude', 'telegramHandle', 'website', 'syncedToDevice', 'isFavorite', 'avatarColorSeed', 'muted', 'blocked', 'lastContactedEpochMs', 'clientUpdatedAtMs', 'updatedAt']) ||
                            incoming().diff(existing()).affectedKeys().hasOnly(['syncedToDevice', 'updatedAt']) ||
                            incoming().diff(existing()).affectedKeys().hasOnly(['isFavorite', 'updatedAt'])
                          );
@@ -195,6 +243,44 @@ service cloud.firestore {
                          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'urlTemplate', 'isDefault', 'updatedAt']);
 
         allow delete: if isOwner(userId) && isValidId(templateId);
+      }
+
+      match /call_logs/{callLogId} {
+        allow get: if isOwner(userId) && isValidId(callLogId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(callLogId) &&
+                         incoming().keys().hasAll(['phoneNumber', 'callType', 'timestampMs', 'durationSec', 'hasRecording', 'clientUpdatedAtMs', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['contactId', 'phoneNumber', 'cachedName', 'callType', 'simSlot', 'timestampMs', 'durationSec', 'transcriptId', 'hasRecording', 'notes', 'clientUpdatedAtMs', 'createdAt', 'updatedAt']) &&
+                         isValidCallLog(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(callLogId) &&
+                         isValidCallLog(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['contactId', 'phoneNumber', 'cachedName', 'callType', 'simSlot', 'timestampMs', 'durationSec', 'transcriptId', 'hasRecording', 'notes', 'clientUpdatedAtMs', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(callLogId);
+      }
+
+      match /call_transcripts/{transcriptId} {
+        allow get: if isOwner(userId) && isValidId(transcriptId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(transcriptId) &&
+                         incoming().keys().hasAll(['phone', 'contactName', 'audioSizeBytes', 'timestampMs', 'durationSec', 'highlights', 'summaryBullets', 'eventAdded', 'notesSaved', 'status', 'clientUpdatedAtMs', 'createdAt', 'updatedAt']) &&
+                         incoming().keys().hasOnly(['contactId', 'phone', 'contactName', 'audioFileName', 'audioSizeBytes', 'timestampMs', 'durationSec', 'transcript', 'highlights', 'summaryBullets', 'oneLineSummary', 'segmentsJson', 'actionItemsJson', 'extractedNotes', 'suggestedEventTitle', 'suggestedEventDateIso', 'suggestedEventEpochMs', 'suggestedCategory', 'eventAdded', 'notesSaved', 'status', 'clientUpdatedAtMs', 'createdAt', 'updatedAt']) &&
+                         isValidCallTranscript(incoming());
+
+        allow update: if isOwner(userId) &&
+                         isValidId(transcriptId) &&
+                         isValidCallTranscript(incoming()) &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['contactId', 'phone', 'contactName', 'audioFileName', 'audioSizeBytes', 'timestampMs', 'durationSec', 'transcript', 'highlights', 'summaryBullets', 'oneLineSummary', 'segmentsJson', 'actionItemsJson', 'extractedNotes', 'suggestedEventTitle', 'suggestedEventDateIso', 'suggestedEventEpochMs', 'suggestedCategory', 'eventAdded', 'notesSaved', 'status', 'clientUpdatedAtMs', 'updatedAt']);
+
+        allow delete: if isOwner(userId) && isValidId(transcriptId);
       }
     }
   }

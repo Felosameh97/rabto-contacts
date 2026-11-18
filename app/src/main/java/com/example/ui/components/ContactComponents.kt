@@ -4,9 +4,11 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.MediaPlayer
+import android.provider.CallLog
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -34,10 +36,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallMade
+import androidx.compose.material.icons.automirrored.rounded.CallMissed
+import androidx.compose.material.icons.automirrored.rounded.CallReceived
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Chat
@@ -47,6 +53,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Email
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.NoteAdd
@@ -63,6 +70,8 @@ import androidx.compose.material.icons.rounded.SimCard
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.VolumeOff
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -108,13 +117,17 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
+import com.example.domain.model.CallLogEntry
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.PaymentTemplate
+import com.example.domain.model.PreCallContext
 import com.example.telecom.CallRecorderManager
+import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.InstaPayPurple
 import com.example.ui.theme.TelegramBlue
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.AppLockSecurity
 import com.example.util.ContactPhotoStorage
 import com.example.util.EgyptGeoLookup
 import com.example.util.PaymentUtils
@@ -222,30 +235,16 @@ fun ContactSummaryCard(
                         onCheckedChange = { onToggleSelect() },
                     )
                 } else {
-                    val hasPhoto = showPhoto && !contact.photoUri.isNullOrBlank() && File(contact.photoUri).exists()
-                    Box(
-                        modifier = Modifier
-                            .size(46.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primaryContainer),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (hasPhoto) {
-                            AsyncImage(
-                                model = File(contact.photoUri!!),
-                                contentDescription = contact.displayName,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        } else {
-                            Text(
-                                text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                fontWeight = FontWeight.Bold,
-                            )
-                        }
-                    }
+                    ContactAvatarBadge(
+                        displayName = contact.displayName,
+                        phone = primary,
+                        photoUri = contact.photoUri,
+                        colorSeed = contact.avatarColorSeed,
+                        showPhoto = showPhoto,
+                        size = 46.dp,
+                        isBlocked = contact.blocked,
+                        isMuted = contact.muted,
+                    )
                 }
 
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -302,14 +301,14 @@ fun ContactSummaryCard(
                 if (primary.isNotBlank()) {
                     FilledTonalIconButton(
                         onClick = { onCall(primary) },
-                        modifier = Modifier.size(44.dp).testTag("quick_call_${contact.id}"),
+                        modifier = Modifier.size(48.dp).testTag("quick_call_${contact.id}"),
                     ) {
                         Icon(Icons.Rounded.Call, contentDescription = "اتصال")
                     }
                     if (!PhoneUtils.isUssdOrShortCode(primary)) {
                         FilledTonalIconButton(
                             onClick = { onWhatsApp(primary) },
-                            modifier = Modifier.size(44.dp).testTag("quick_wa_${contact.id}"),
+                            modifier = Modifier.size(48.dp).testTag("quick_wa_${contact.id}"),
                         ) {
                             Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen)
                         }
@@ -326,17 +325,21 @@ fun ContactDetailBottomSheet(
     contact: ContactRecord,
     paymentTemplates: List<PaymentTemplate>,
     contactTranscripts: List<CallTranscriptRecord> = emptyList(),
+    contactCallLogs: List<CallLogEntry> = emptyList(),
+    preCallContext: PreCallContext? = null,
     showPhoto: Boolean = true,
     preferredSimSlot: Int? = null,
     whatsappTemplates: List<String> = emptyList(),
     onDismiss: () -> Unit,
     onToggleFavorite: (ContactRecord) -> Unit,
+    onToggleBlocked: (ContactRecord) -> Unit = {},
+    onToggleMuted: (ContactRecord) -> Unit = {},
     onEdit: (ContactRecord) -> Unit,
     onDelete: (ContactRecord) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
     onWhatsAppWithTemplate: (ContactRecord, String, String) -> Unit = { c, p, _ -> onWhatsApp(c, p) },
     onScheduleFollowUp: (ContactRecord, String, Int?) -> Unit = { _, _, _ -> },
-    onToggleDeviceSync: (ContactRecord) -> Unit,
+    onToggleDeviceSync: (ContactRecord) -> Unit = {},
     onAddPaymentTemplate: (String, String) -> Unit,
     onUpdatePhoto: (ContactRecord, String?) -> Unit = { _, _ -> },
     onAnalyzeCallAudio: (CallTranscriptRecord) -> Unit = {},
@@ -344,6 +347,7 @@ fun ContactDetailBottomSheet(
     onMarkCalendarAdded: (String) -> Unit = {},
     onRecordCall: (String) -> Unit = {},
     onSearchByTag: (String) -> Unit = {},
+    onOpenTranscript: (CallTranscriptRecord) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -457,12 +461,9 @@ fun ContactDetailBottomSheet(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                val hasPhoto = showPhoto && !contact.photoUri.isNullOrBlank() && File(contact.photoUri).exists()
                 Box(
                     modifier = Modifier
                         .size(64.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer)
                         .clickable {
                             photoPickerLauncher.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -471,20 +472,16 @@ fun ContactDetailBottomSheet(
                         .testTag("detail_photo_picker_btn"),
                     contentAlignment = Alignment.Center,
                 ) {
-                    if (hasPhoto) {
-                        AsyncImage(
-                            model = File(contact.photoUri!!),
-                            contentDescription = contact.displayName,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                    } else {
-                        Text(
-                            text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
-                            style = MaterialTheme.typography.headlineSmall,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
-                    }
+                    ContactAvatarBadge(
+                        displayName = contact.displayName,
+                        phone = contact.primaryPhone,
+                        photoUri = contact.photoUri,
+                        colorSeed = contact.avatarColorSeed,
+                        showPhoto = showPhoto,
+                        size = 64.dp,
+                        isBlocked = contact.blocked,
+                        isMuted = contact.muted,
+                    )
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
@@ -514,6 +511,40 @@ fun ContactDetailBottomSheet(
                     if (meta.isNotBlank()) {
                         Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
+                    if (contact.blocked || contact.muted) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.padding(top = 4.dp),
+                        ) {
+                            if (contact.blocked) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = ErrorRed.copy(alpha = 0.16f),
+                                ) {
+                                    Text(
+                                        text = "محظور",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = ErrorRed,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                            if (contact.muted) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.secondaryContainer,
+                                ) {
+                                    Text(
+                                        text = "مكتوم",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 IconButton(onClick = { onToggleFavorite(contact) }, modifier = Modifier.testTag("detail_fav_btn")) {
                     Icon(
@@ -524,6 +555,47 @@ fun ContactDetailBottomSheet(
                 }
                 IconButton(onClick = { showQrDialog = true }, modifier = Modifier.testTag("detail_qr_btn")) {
                     Icon(Icons.Rounded.QrCode2, contentDescription = "عرض QR")
+                }
+            }
+
+            if (preCallContext != null && (preCallContext.lastSpokeEpochMs != null || !preCallContext.oneLineSummary.isNullOrBlank())) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("detail_pre_call_context"),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        val lastSpokeLabel = preCallContext.lastSpokeEpochMs?.let {
+                            AppLockSecurity.formatRelativeTimeAr(it)
+                        }
+                        val headerParts = buildList {
+                            lastSpokeLabel?.takeIf { it.isNotBlank() }?.let { add("آخر تواصل: $it") }
+                            if (preCallContext.totalCallsCount > 0) add("${preCallContext.totalCallsCount} مكالمة")
+                            if (preCallContext.pendingActionItemsCount > 0) add("${preCallContext.pendingActionItemsCount} مهام معلقة")
+                        }.joinToString(" • ")
+                        if (headerParts.isNotBlank()) {
+                            Text(
+                                text = headerParts,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        preCallContext.oneLineSummary?.takeIf { it.isNotBlank() }?.let { summary ->
+                            Text(
+                                text = summary,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
             }
 
@@ -962,6 +1034,89 @@ fun ContactDetailBottomSheet(
                 }
             }
 
+            // Dedicated Chronological Call History for this Contact
+            if (contactCallLogs.isNotEmpty()) {
+                HorizontalDivider()
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(Icons.Rounded.History, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Text(
+                        text = "سجل المكالمات مع ${contact.displayName} (${contactCallLogs.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                val logFmt = remember { SimpleDateFormat("dd/MM/yyyy • HH:mm", Locale.getDefault()) }
+                contactCallLogs.take(15).forEach { entry ->
+                    val linkedTranscript = entry.transcriptId?.let { tid ->
+                        contactTranscripts.firstOrNull { it.id == tid }
+                    }
+                    val isMissed = entry.callType == CallLog.Calls.MISSED_TYPE ||
+                        entry.callType == CallLog.Calls.REJECTED_TYPE
+                    val typeIcon = when (entry.callType) {
+                        CallLog.Calls.INCOMING_TYPE -> Icons.AutoMirrored.Rounded.CallReceived
+                        CallLog.Calls.OUTGOING_TYPE -> Icons.AutoMirrored.Rounded.CallMade
+                        else -> Icons.AutoMirrored.Rounded.CallMissed
+                    }
+                    val typeLabel = when (entry.callType) {
+                        CallLog.Calls.INCOMING_TYPE -> "واردة"
+                        CallLog.Calls.OUTGOING_TYPE -> "صادرة"
+                        CallLog.Calls.REJECTED_TYPE -> "مرفوضة"
+                        else -> "فائتة"
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                if (linkedTranscript != null) {
+                                    onOpenTranscript(linkedTranscript)
+                                } else {
+                                    placeCall(entry.number, preferredSimSlot ?: entry.simSlot)
+                                }
+                            }
+                            .testTag("detail_call_log_${entry.id}"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Icon(
+                                imageVector = typeIcon,
+                                contentDescription = typeLabel,
+                                tint = if (isMissed) ErrorRed else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "$typeLabel • ${entry.number}" + if (entry.callCount > 1) " (${entry.callCount})" else "",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = if (isMissed) ErrorRed else MaterialTheme.colorScheme.onSurface,
+                                )
+                                val durationLabel = if (entry.durationSec > 0) {
+                                    " • ${AppLockSecurity.formatDurationClock(entry.durationSec)}"
+                                } else ""
+                                Text(
+                                    text = "${logFmt.format(Date(entry.timestampMs))}$durationLabel",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            if (linkedTranscript != null) {
+                                AssistChip(
+                                    onClick = { onOpenTranscript(linkedTranscript) },
+                                    label = { Text("تفريغ", style = MaterialTheme.typography.labelSmall) },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             if (!contact.notes.isNullOrBlank()) {
                 HorizontalDivider()
                 Text("ملاحظات", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
@@ -984,12 +1139,52 @@ fun ContactDetailBottomSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FilledTonalButton(
-                    onClick = { onToggleDeviceSync(contact) },
-                    modifier = Modifier.weight(1f).testTag("detail_sync_phone_btn"),
+                    onClick = { onToggleMuted(contact) },
+                    modifier = Modifier.weight(1f).testTag("detail_mute_btn"),
                 ) {
-                    Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(
+                        imageVector = if (contact.muted) Icons.Rounded.VolumeUp else Icons.Rounded.VolumeOff,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
                     Spacer(Modifier.width(6.dp))
-                    Text(if (contact.syncedToDevice) "إزالة من الهاتف" else "حفظ بالهاتف")
+                    Text(if (contact.muted) "إلغاء الكتم" else "كتم الرنين")
+                }
+                OutlinedButton(
+                    onClick = { onToggleBlocked(contact) },
+                    colors = if (contact.blocked) {
+                        ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary)
+                    } else {
+                        ButtonDefaults.outlinedButtonColors(contentColor = ErrorRed)
+                    },
+                    modifier = Modifier.weight(1f).testTag("detail_block_btn"),
+                ) {
+                    Icon(Icons.Rounded.Block, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (contact.blocked) "فك الحظر" else "حظر المتصل")
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                FilledTonalButton(
+                    onClick = {
+                        val shareText = AppLockSecurity.formatContactShareText(contact)
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, shareText)
+                        }
+                        runCatching {
+                            context.startActivity(Intent.createChooser(shareIntent, "مشاركة بيانات جهة الاتصال"))
+                        }
+                    },
+                    modifier = Modifier.weight(1f).testTag("detail_share_text_btn"),
+                ) {
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("مشاركة كنص")
                 }
                 OutlinedButton(
                     onClick = {

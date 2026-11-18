@@ -209,6 +209,65 @@ object ContactDeduplicator {
         )
     }
 
+    /**
+     * Scans records and returns clusters (size >= 2) sharing normalized phone keys,
+     * emails, or identical normalized names so the user can review and merge duplicates cleanly.
+     */
+    fun findDuplicateClusters(records: List<ContactRecord>): List<List<ContactRecord>> {
+        if (records.size < 2) return emptyList()
+        val n = records.size
+        val parent = IntArray(n) { it }
+
+        fun find(x: Int): Int {
+            var r = x
+            while (parent[r] != r) {
+                parent[r] = parent[parent[r]]
+                r = parent[r]
+            }
+            return r
+        }
+
+        fun union(a: Int, b: Int) {
+            val ra = find(a)
+            val rb = find(b)
+            if (ra != rb) parent[rb] = ra
+        }
+
+        val byPhone = HashMap<String, Int>(n * 2)
+        val byEmail = HashMap<String, Int>(n)
+        val byName = HashMap<String, Int>(n)
+
+        for (i in records.indices) {
+            val rec = records[i]
+            val phones = (listOf(rec.primaryPhone) + rec.phones).filter { it.isNotBlank() }
+            for (p in phones) {
+                val key = PhoneUtils.phoneSearchKey(p)
+                if (key.length >= 7) {
+                    val prev = byPhone[key]
+                    if (prev == null) byPhone[key] = i else union(prev, i)
+                }
+            }
+            for (em in rec.emails) {
+                val ek = em.trim().lowercase(Locale.ROOT)
+                if (ek.contains("@")) {
+                    val prev = byEmail[ek]
+                    if (prev == null) byEmail[ek] = i else union(prev, i)
+                }
+            }
+            val normName = rec.displayName.trim().lowercase(Locale.ROOT).replace(Regex("\\s+"), " ")
+            if (normName.length >= 3 && normName.any { it.isLetter() }) {
+                val prev = byName[normName]
+                if (prev == null) byName[normName] = i else union(prev, i)
+            }
+        }
+
+        val clusters = LinkedHashMap<Int, MutableList<ContactRecord>>()
+        for (i in records.indices) {
+            clusters.getOrPut(find(i)) { ArrayList(2) }.add(records[i])
+        }
+        return clusters.values.filter { it.size >= 2 }
+    }
+
     private fun mergeCluster(
         cluster: List<ContactRecord>,
         enforceBilingual: Boolean,
@@ -240,8 +299,10 @@ object ContactDeduplicator {
         var bestTelegram: String? = null
         var bestWebsite: String? = null
         var bestPhotoUri: String? = null
-        var anySynced = false
         var anyFavorite = false
+        var anyMuted = false
+        var anyBlocked = false
+        var latestContacted = 0L
 
         for (item in sorted) {
             if (item.displayName.isNotBlank()) allNameVariants += item.displayName
@@ -294,8 +355,10 @@ object ContactDeduplicator {
             if (bestPhotoUri.isNullOrBlank()) {
                 item.photoUri?.takeIf { it.isNotBlank() }?.let { bestPhotoUri = it }
             }
-            if (item.syncedToDevice) anySynced = true
             if (item.isFavorite) anyFavorite = true
+            if (item.muted) anyMuted = true
+            if (item.blocked) anyBlocked = true
+            if (item.lastContactedEpochMs > latestContacted) latestContacted = item.lastContactedEpochMs
         }
 
         val mergedPhones = allPhones.values.take(10)
@@ -360,8 +423,12 @@ object ContactDeduplicator {
             telegramHandle = bestTelegram,
             website = bestWebsite,
             photoUri = bestPhotoUri,
-            syncedToDevice = anySynced,
+            syncedToDevice = false,
             isFavorite = anyFavorite || starredFromCat,
+            avatarColorSeed = anchor.avatarColorSeed,
+            muted = anyMuted,
+            blocked = anyBlocked,
+            lastContactedEpochMs = latestContacted,
             createdAt = anchor.createdAt,
         )
         return winner to droppedIds

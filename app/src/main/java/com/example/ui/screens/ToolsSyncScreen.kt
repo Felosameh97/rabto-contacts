@@ -40,7 +40,10 @@ import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DriveFolderUpload
 import androidx.compose.material.icons.rounded.FileOpen
+import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Lock
+import androidx.compose.material.icons.rounded.MergeType
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.Payments
@@ -54,6 +57,7 @@ import androidx.compose.material.icons.rounded.SimCard
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -99,6 +103,7 @@ import com.example.telecom.CallRecordingItem
 import com.example.telecom.RabtaInCallService
 import com.example.telecom.RecordingSourceMode
 import com.example.ui.components.AddPaymentTemplateDialog
+import com.example.ui.components.SetPinDialog
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.WhatsAppGreen
@@ -137,6 +142,11 @@ fun ToolsSyncScreen(
     vibrateOnAnswer: Boolean = true,
     autoSpeakerForRecord: Boolean = false,
     whatsappTemplates: List<String> = emptyList(),
+    appLockEnabled: Boolean = false,
+    hasAppLockPin: Boolean = false,
+    biometricLockEnabled: Boolean = true,
+    hideLockscreenCallerDetails: Boolean = false,
+    duplicateClustersCount: Int = 0,
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetCalmPalette: (CalmPalette) -> Unit,
     onSetAutoRecordCalls: (Boolean) -> Unit,
@@ -148,6 +158,11 @@ fun ToolsSyncScreen(
     onSetRecordingSourceMode: (RecordingSourceMode) -> Unit = {},
     onSetVibrateOnAnswer: (Boolean) -> Unit = {},
     onSetAutoSpeakerForRecord: (Boolean) -> Unit = {},
+    onSetAppLockPin: (String) -> Unit = {},
+    onToggleAppLockEnabled: (Boolean) -> Unit = {},
+    onSetBiometricLockEnabled: (Boolean) -> Unit = {},
+    onSetHideLockscreenCallerDetails: (Boolean) -> Unit = {},
+    onLockAppNow: () -> Unit = {},
     onAddWhatsAppTemplate: (String) -> Unit = {},
     onRemoveWhatsAppTemplate: (String) -> Unit = {},
     onRefreshRecordings: () -> Unit = {},
@@ -161,6 +176,8 @@ fun ToolsSyncScreen(
     onImportExternalFile: (android.net.Uri, String?) -> Unit,
     onPullFromCloud: () -> Unit,
     onShareExport: (Boolean) -> Unit,
+    onExportJson: () -> Unit = {},
+    onOpenDuplicateMerge: () -> Unit = {},
     onOpenQrScanner: () -> Unit,
     onSyncWeeklyWhatsApp: () -> Unit,
     onRemoveFromPhonebook: (ContactRecord) -> Unit,
@@ -178,6 +195,7 @@ fun ToolsSyncScreen(
     var repoInput by remember(githubRepoSlug) { mutableStateOf(githubRepoSlug) }
     var showAddPayment by remember { mutableStateOf(false) }
     var showAddWaTemplate by remember { mutableStateOf(false) }
+    var showSetPinDialog by remember { mutableStateOf(false) }
     var driveErrorMsg by remember { mutableStateOf<String?>(null) }
     var isDefaultDialer by remember { mutableStateOf(RabtaInCallService.isDefaultDialer(context)) }
     var hasMicPermission by remember {
@@ -309,6 +327,115 @@ fun ToolsSyncScreen(
             }
         }
 
+        // Section 0.75: App Lock & Lockscreen Privacy
+        item {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(Icons.Rounded.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("قفل التطبيق وخصوصية شاشة القفل", style = MaterialTheme.typography.titleMedium)
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("قفل التطبيق برمز PIN / البصمة", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "يحمي قائمة الأرقام والتسجيلات والتفريغ عند فتح التطبيق.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = appLockEnabled,
+                            onCheckedChange = { wantEnable ->
+                                if (wantEnable && !hasAppLockPin) {
+                                    showSetPinDialog = true
+                                } else {
+                                    onToggleAppLockEnabled(wantEnable)
+                                }
+                            },
+                            modifier = Modifier.testTag("settings_app_lock_switch"),
+                        )
+                    }
+
+                    if (appLockEnabled || hasAppLockPin) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Icon(Icons.Rounded.Fingerprint, contentDescription = null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(20.dp))
+                                Column {
+                                    Text("الفتح بالبصمة / قفل الهاتف", style = MaterialTheme.typography.titleSmall)
+                                    Text("يتيح تجاوز PIN بالبصمة الموثقة.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                            Switch(
+                                checked = biometricLockEnabled,
+                                onCheckedChange = onSetBiometricLockEnabled,
+                                modifier = Modifier.testTag("settings_biometric_lock_switch"),
+                            )
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                            OutlinedButton(
+                                onClick = { showSetPinDialog = true },
+                                modifier = Modifier.weight(1f).testTag("settings_change_pin_btn"),
+                            ) {
+                                Text(if (hasAppLockPin) "تغيير رمز PIN" else "تعيين PIN")
+                            }
+                            if (appLockEnabled && hasAppLockPin) {
+                                FilledTonalButton(
+                                    onClick = onLockAppNow,
+                                    modifier = Modifier.weight(1f).testTag("settings_lock_now_btn"),
+                                ) {
+                                    Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("قفل الآن")
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Icon(Icons.Rounded.VisibilityOff, contentDescription = null, tint = MaterialTheme.colorScheme.secondary, modifier = Modifier.size(20.dp))
+                            Column {
+                                Text("إخفاء هوية المتصل على شاشة القفل", style = MaterialTheme.typography.titleSmall)
+                                Text("يعرض \"مكالمة خاصة\" على الشاشة المغلقة دون كشف الاسم أو الرقم.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        Switch(
+                            checked = hideLockscreenCallerDetails,
+                            onCheckedChange = onSetHideLockscreenCallerDetails,
+                            modifier = Modifier.testTag("settings_hide_lockscreen_switch"),
+                        )
+                    }
+                }
+            }
+        }
+
         // Section 0.5: Photos, Privacy Isolation, Auto-Transcribe & SIM Preference
         item {
             Card(
@@ -390,7 +517,7 @@ fun ToolsSyncScreen(
                         OutlinedButton(
                             onClick = {
                                 purgeContactsPermLauncher.launch(
-                                    arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
+                                    arrayOf(Manifest.permission.READ_CONTACTS)
                                 )
                             },
                             enabled = !isBusy,
@@ -779,13 +906,13 @@ fun ToolsSyncScreen(
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         FilledTonalButton(
-                            onClick = { filePicker.launch(arrayOf("text/*", "text/csv", "text/x-vcard", "*/*")) },
+                            onClick = { filePicker.launch(arrayOf("application/json", "text/*", "text/csv", "text/x-vcard", "*/*")) },
                             enabled = !isBusy,
                             modifier = Modifier.weight(1f).testTag("tools_import_file_btn"),
                         ) {
                             Icon(Icons.Rounded.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("ملف CSV/VCF")
+                            Text("ملف JSON/CSV/VCF")
                         }
                         FilledTonalButton(
                             onClick = onPullFromCloud,
@@ -800,13 +927,12 @@ fun ToolsSyncScreen(
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(
-                            onClick = onReorganizeCategories,
-                            enabled = !isBusy,
-                            modifier = Modifier.weight(1f).testTag("tools_reorganize_btn"),
+                            onClick = onExportJson,
+                            modifier = Modifier.weight(1f).testTag("tools_export_json_btn"),
                         ) {
-                            Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("منع التكرار + English + Tags")
+                            Text("تصدير JSON آمن")
                         }
                         OutlinedButton(
                             onClick = { onShareExport(true) },
@@ -815,6 +941,27 @@ fun ToolsSyncScreen(
                             Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
                             Text("تصدير VCF")
+                        }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = onOpenDuplicateMerge,
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).testTag("tools_duplicate_merge_btn"),
+                        ) {
+                            Icon(Icons.Rounded.MergeType, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (duplicateClustersCount > 0) "دمج التكرارات ($duplicateClustersCount)" else "فحص ودمج التكرارات")
+                        }
+                        OutlinedButton(
+                            onClick = onReorganizeCategories,
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).testTag("tools_reorganize_btn"),
+                        ) {
+                            Icon(Icons.Rounded.AutoFixHigh, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("تنظيم + Tags")
                         }
                     }
 
@@ -862,7 +1009,7 @@ fun ToolsSyncScreen(
                         Button(
                             onClick = {
                                 contactsSyncPermLauncher.launch(
-                                    arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS)
+                                    arrayOf(Manifest.permission.READ_CONTACTS)
                                 )
                             },
                             enabled = !isBusy,
@@ -1224,6 +1371,17 @@ fun ToolsSyncScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showAddWaTemplate = false }) { Text("إلغاء") }
+            },
+        )
+    }
+
+    if (showSetPinDialog) {
+        SetPinDialog(
+            hasExistingPin = hasAppLockPin,
+            onDismiss = { showSetPinDialog = false },
+            onConfirmPin = { newPin ->
+                onSetAppLockPin(newPin)
+                showSetPinDialog = false
             },
         )
     }

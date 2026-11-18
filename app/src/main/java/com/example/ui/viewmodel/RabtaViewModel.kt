@@ -13,6 +13,7 @@ import com.example.data.local.CallTranscriptEntity
 import com.example.data.local.CategoryEntity
 import com.example.data.local.ContactEntity
 import com.example.data.local.DialHistoryEntity
+import com.example.data.local.LocalMediaCacheManager
 import com.example.data.local.PaymentTemplateEntity
 import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
@@ -20,6 +21,7 @@ import com.example.data.local.WhatsAppLogEntity
 import com.example.data.remote.FirestoreContactsRepository
 import com.example.data.remote.GitHubUpdateService
 import com.example.data.remote.GoogleDriveScanner
+import com.example.data.sync.OfflineFirstSyncEngine
 import com.example.domain.model.CallLogEntry
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.CategoryNode
@@ -28,7 +30,12 @@ import com.example.domain.model.ContactRecord
 import com.example.domain.model.CsvImportSummary
 import com.example.domain.model.DialHistoryEntry
 import com.example.domain.model.GitHubReleaseInfo
+import com.example.domain.model.GlobalSearchResult
+import com.example.domain.model.LocalMediaCacheStats
 import com.example.domain.model.PaymentTemplate
+import com.example.domain.model.PreCallContext
+import com.example.domain.model.SyncEngineState
+import com.example.domain.model.SyncState
 import com.example.domain.model.WhatsAppLog
 import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
@@ -37,16 +44,19 @@ import com.example.telecom.RabtaInCallService
 import com.example.telecom.RecordingSourceMode
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
+import com.example.util.AppLockSecurity
 import com.example.util.BilingualNameEngine
 import com.example.util.ContactDeduplicator
 import com.example.util.CsvParser
 import com.example.util.EgyptGeoLookup
 import com.example.util.FollowUpReminderScheduler
+import com.example.util.JsonContactExporter
 import com.example.util.PaymentUtils
 import com.example.util.PhoneUtils
 import com.example.util.SimPreference
 import com.example.util.SmartCategoryEngine
 import com.example.util.SystemIntents
+import com.example.util.T9SearchMatcher
 import com.example.util.VCardUtils
 import com.example.widget.RabtaWidget
 import com.google.firebase.firestore.DocumentSnapshot
@@ -96,6 +106,12 @@ class RabtaViewModel(
     private val prefs: SyncPrefsDataStore,
     private val gitHubService: GitHubUpdateService,
     private val aiAssistant: RabtaAiAssistant = RabtaAiAssistant(),
+    private val syncEngine: OfflineFirstSyncEngine = OfflineFirstSyncEngine(
+        context = appContext,
+        roomDb = db,
+        firestoreRepo = firestoreRepo,
+        prefs = prefs,
+    ),
 ) : ViewModel() {
 
     private val contactDao = db.contactDao()
@@ -130,8 +146,17 @@ class RabtaViewModel(
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), PaymentUtils.defaultTemplates)
 
+    val syncEngineState: StateFlow<SyncEngineState> = syncEngine.syncState
+
+    val allContactsAlphabetical: StateFlow<List<ContactRecord>> = contactDao.observeAllAlphabetical()
+        .map { list -> list.map { it.toDomain() } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     val callTranscripts: StateFlow<List<CallTranscriptRecord>> = transcriptDao.observeAll()
         .map { list -> list.map { it.toDomain() } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val appCallLogs: StateFlow<List<CallLogEntry>> = syncEngine.observeRecentCallLogsEnriched(250)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val dialHistory: StateFlow<List<DialHistoryEntry>> = dialHistoryDao.observeActiveHistory()
@@ -186,6 +211,18 @@ class RabtaViewModel(
 
     val whatsappTemplates: StateFlow<List<String>> = prefs.whatsappTemplatesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SyncPrefsDataStore.DEFAULT_WHATSAPP_TEMPLATES)
+
+    val appLockEnabled: StateFlow<Boolean> = prefs.appLockEnabledFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val appLockPinHash: StateFlow<String> = prefs.appLockPinHashFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "")
+
+    val biometricLockEnabled: StateFlow<Boolean> = prefs.biometricLockEnabledFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    val hideLockscreenCallerDetails: StateFlow<Boolean> = prefs.hideLockscreenCallerDetailsFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     private val _sessionUnlockedCategories = MutableStateFlow<Set<String>>(emptySet())
     val sessionUnlockedCategories = _sessionUnlockedCategories.asStateFlow()
@@ -262,6 +299,18 @@ class RabtaViewModel(
     private val _callRecordings = MutableStateFlow<List<CallRecordingItem>>(emptyList())
     val callRecordings = _callRecordings.asStateFlow()
 
+    private val _globalSearchResult = MutableStateFlow(GlobalSearchResult())
+    val globalSearchResult = _globalSearchResult.asStateFlow()
+
+    private val _preCallContext = MutableStateFlow<PreCallContext?>(null)
+    val preCallContext = _preCallContext.asStateFlow()
+
+    private val _cacheStats = MutableStateFlow(LocalMediaCacheStats())
+    val cacheStats = _cacheStats.asStateFlow()
+
+    private val _duplicateClusters = MutableStateFlow<List<List<ContactRecord>>>(emptyList())
+    val duplicateClusters = _duplicateClusters.asStateFlow()
+
     private var searchJob: Job? = null
     private var dialpadJob: Job? = null
     private var cloudUploadJob: Job? = null
@@ -271,6 +320,7 @@ class RabtaViewModel(
     }
 
     private fun initializeSession() {
+        syncEngine.startTwoWaySync(currentUserId, viewModelScope)
         viewModelScope.launch {
             firestoreRepo.ensureUserProfile(currentUserId, currentUserName, currentUserEmail)
             withContext(Dispatchers.IO) {
@@ -283,43 +333,7 @@ class RabtaViewModel(
             refreshCallLogs()
             loadCategoryLevel("")
             refreshRecordings()
-
-            launch {
-                firestoreRepo.observeWhatsAppLogs(currentUserId)
-                    .catch { }
-                    .collect { cloudLogs ->
-                        if (cloudLogs.isNotEmpty()) {
-                            withContext(Dispatchers.IO) {
-                                logDao.upsertAll(
-                                    cloudLogs.map {
-                                        WhatsAppLogEntity(
-                                            id = it.id,
-                                            contactId = it.contactId,
-                                            contactName = it.contactName,
-                                            phone = it.phone,
-                                            loggedAtEpochMs = it.loggedAtEpochMs,
-                                            syncedToPhone = it.syncedToPhone,
-                                        )
-                                    }
-                                )
-                            }
-                        }
-                    }
-            }
-
-            launch {
-                firestoreRepo.observePaymentTemplates(currentUserId)
-                    .catch { }
-                    .collect { templates ->
-                        if (templates.isNotEmpty()) {
-                            withContext(Dispatchers.IO) {
-                                paymentDao.upsertAll(
-                                    templates.map { PaymentTemplateEntity(it.id, it.name, it.urlTemplate, it.isDefault) }
-                                )
-                            }
-                        }
-                    }
-            }
+            refreshCacheStats()
 
             launch {
                 val savedRepo = prefs.githubRepoFlow.firstOrNull().orEmpty().trim()
@@ -337,20 +351,26 @@ class RabtaViewModel(
                 transcriptDao.observeAll()
                     .catch { }
                     .collect { entities ->
-                        if (autoTranscribeCalls.value) {
-                            entities
-                                .filter { it.status == "PENDING" && it.audioFilePath.isNotBlank() }
-                                .filter { processingTranscriptIds.add(it.id) }
-                                .take(2)
-                                .forEach { pending ->
-                                    launch {
-                                        analyzeCallTranscriptInternal(pending.toDomain())
-                                    }
+                        entities
+                            .filter {
+                                (it.status == "PENDING_AI" || (autoTranscribeCalls.value && it.status == "PENDING")) &&
+                                    it.audioFilePath.isNotBlank()
+                            }
+                            .filter { processingTranscriptIds.add(it.id) }
+                            .take(2)
+                            .forEach { pending ->
+                                launch {
+                                    analyzeCallTranscriptInternal(pending.toDomain())
                                 }
-                        }
+                            }
                     }
             }
         }
+    }
+
+    override fun onCleared() {
+        syncEngine.stop()
+        super.onCleared()
     }
 
     fun setThemeMode(mode: ThemeMode) {
@@ -395,6 +415,40 @@ class RabtaViewModel(
 
     fun setAutoSpeakerForRecord(enabled: Boolean) {
         viewModelScope.launch { prefs.setAutoSpeakerForRecord(enabled) }
+    }
+
+    fun setAppLockPin(pin: String) {
+        if (!AppLockSecurity.isValidPinFormat(pin)) {
+            _statusMessage.value = "الرمز يجب أن يكون من 4 إلى 6 أرقام"
+            return
+        }
+        viewModelScope.launch {
+            prefs.setAppLockPin(AppLockSecurity.hashPin(pin), enabled = true)
+            _statusMessage.value = "تم تفعيل قفل التطبيق برمز المرور بنجاح"
+        }
+    }
+
+    fun setAppLockEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            if (!enabled) {
+                prefs.disableAppLock()
+                _statusMessage.value = "تم إيقاف قفل التطبيق"
+            } else {
+                val existingHash = appLockPinHash.value
+                if (existingHash.isNotBlank()) {
+                    prefs.setAppLockPin(existingHash, enabled = true)
+                    _statusMessage.value = "تم تفعيل قفل التطبيق"
+                }
+            }
+        }
+    }
+
+    fun setBiometricLockEnabled(enabled: Boolean) {
+        viewModelScope.launch { prefs.setBiometricLockEnabled(enabled) }
+    }
+
+    fun setHideLockscreenCallerDetails(enabled: Boolean) {
+        viewModelScope.launch { prefs.setHideLockscreenCallerDetails(enabled) }
     }
 
     fun toggleCategoryLock(categoryPath: String) {
@@ -495,23 +549,52 @@ class RabtaViewModel(
     fun refreshRecordings() {
         viewModelScope.launch(Dispatchers.IO) {
             _callRecordings.value = CallRecorderManager.listRecordings(appContext)
+            _cacheStats.value = LocalMediaCacheManager.computeCacheStats(appContext)
         }
+    }
+
+    fun refreshCacheStats() {
+        viewModelScope.launch(Dispatchers.IO) {
+            _cacheStats.value = LocalMediaCacheManager.computeCacheStats(appContext)
+        }
+    }
+
+    fun triggerCloudSyncNow() {
+        viewModelScope.launch {
+            syncEngine.syncNow(currentUserId)
+        }
+    }
+
+    fun loadPreCallContext(contactId: String?, phone: String) {
+        if (contactId.isNullOrBlank() && phone.count { it.isDigit() } < 4) {
+            _preCallContext.value = null
+            return
+        }
+        viewModelScope.launch {
+            _preCallContext.value = syncEngine.getPreCallContext(contactId, phone)
+        }
+    }
+
+    fun clearPreCallContext() {
+        _preCallContext.value = null
     }
 
     fun deleteRecording(item: CallRecordingItem) {
         viewModelScope.launch(Dispatchers.IO) {
             CallRecorderManager.deleteRecording(item.file)
             _callRecordings.value = CallRecorderManager.listRecordings(appContext)
+            _cacheStats.value = LocalMediaCacheManager.computeCacheStats(appContext)
         }
         _statusMessage.value = "تم حذف التسجيل"
     }
 
     fun updateContactPhoto(contact: ContactRecord, photoPath: String?) {
         viewModelScope.launch {
-            val updated = contact.copy(photoUri = photoPath?.takeIf { it.isNotBlank() })
-            withContext(Dispatchers.IO) {
-                contactDao.upsertSingleWithIndexes(ContactEntity.fromDomain(updated))
-            }
+            val updated = contact.copy(
+                photoUri = photoPath?.takeIf { it.isNotBlank() },
+                syncedToDevice = false,
+            )
+            syncEngine.saveContactLocalFirst(updated)
             if (_selectedContact.value?.id == updated.id) {
                 _selectedContact.value = updated
             }
@@ -548,59 +631,119 @@ class RabtaViewModel(
                 phone = cleanPhone.ifBlank { item.displayName },
                 contactName = item.displayName,
                 audioFilePath = item.file.absolutePath,
+                audioFileName = item.file.name,
+                audioSizeBytes = item.file.length(),
+                audioCachedLocally = item.file.exists() && item.file.length() > 256L,
                 timestampMs = item.timestampMs,
                 durationSec = 0L,
                 status = "PENDING",
+                updatedAtEpochMs = System.currentTimeMillis(),
+                syncState = SyncState.PENDING.name,
             )
-            withContext(Dispatchers.IO) {
-                transcriptDao.upsert(rec.toEntity())
-            }
+            syncEngine.saveTranscriptLocalFirst(rec, enqueueCloudSync = true)
             analyzeCallTranscript(rec)
         }
     }
 
     private suspend fun analyzeCallTranscriptInternal(record: CallTranscriptRecord) {
         try {
-            val audioFile = File(record.audioFilePath)
+            val audioFile = LocalMediaCacheManager.resolvePlayableAudioFile(
+                context = appContext,
+                audioFilePath = record.audioFilePath,
+                audioFileName = record.audioFileName,
+            ) ?: File(record.audioFilePath)
             if (!audioFile.exists() || audioFile.length() == 0L) {
-                withContext(Dispatchers.IO) {
-                    transcriptDao.upsert(record.copy(status = "ERROR", transcript = "ملف الصوت غير موجود أو فارغ").toEntity())
-                }
+                syncEngine.saveTranscriptLocalFirst(
+                    record.copy(status = "ERROR", transcript = "ملف الصوت غير موجود أو فارغ"),
+                    enqueueCloudSync = false,
+                )
                 return
             }
-            withContext(Dispatchers.IO) {
-                transcriptDao.upsert(record.copy(status = "PROCESSING").toEntity())
-            }
+            val cachedAudio = LocalMediaCacheManager.ensureRecordingCachedLocally(appContext, audioFile) ?: audioFile
+            syncEngine.saveTranscriptLocalFirst(
+                record.copy(
+                    status = "PROCESSING",
+                    audioFilePath = cachedAudio.absolutePath,
+                    audioFileName = cachedAudio.name,
+                    audioSizeBytes = cachedAudio.length(),
+                    audioCachedLocally = true,
+                ),
+                enqueueCloudSync = false,
+            )
             val res = aiAssistant.analyzeCallRecording(
-                audioFile = audioFile,
+                audioFile = cachedAudio,
                 contactName = record.contactName,
                 phone = record.phone,
             )
             res.onSuccess { analysis ->
+                val localEnrich = LocalTranscriptAnalyzer.analyze(
+                    rawTranscript = analysis.transcript,
+                    contactName = record.contactName,
+                    phone = record.phone,
+                    referenceTimeMs = record.timestampMs.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                    durationSec = record.durationSec,
+                )
+                val bullets = analysis.summaryBullets.take(3)
+                    .ifEmpty { analysis.highlights.take(3) }
+                    .ifEmpty { localEnrich.summaryBullets }
+                val headline = analysis.oneLineSummary.ifBlank {
+                    bullets.firstOrNull() ?: localEnrich.oneLineSummary
+                }
+                val finalSegments = analysis.segments.ifEmpty { localEnrich.segments }
+                val finalActionItems = (analysis.actionItems + localEnrich.actionItems)
+                    .distinctBy { it.title.trim().lowercase(Locale.getDefault()) }
+                    .take(6)
                 val readyRecord = record.copy(
+                    audioFilePath = cachedAudio.absolutePath,
+                    audioFileName = cachedAudio.name,
+                    audioSizeBytes = cachedAudio.length(),
+                    audioCachedLocally = true,
                     transcript = analysis.transcript,
                     highlights = analysis.highlights,
-                    extractedNotes = analysis.extractedNotes,
-                    suggestedEventTitle = analysis.eventTitle,
-                    suggestedEventDateIso = analysis.eventDateIso,
-                    suggestedEventEpochMs = analysis.eventEpochMs,
+                    summaryBullets = bullets,
+                    oneLineSummary = headline,
+                    segments = finalSegments,
+                    actionItems = finalActionItems,
+                    extractedNotes = analysis.extractedNotes.ifBlank { localEnrich.extractedNotes },
+                    suggestedEventTitle = analysis.eventTitle.ifBlank { localEnrich.eventTitle },
+                    suggestedEventDateIso = analysis.eventDateIso.ifBlank { localEnrich.eventDateIso },
+                    suggestedEventEpochMs = analysis.eventEpochMs ?: localEnrich.eventEpochMs,
                     suggestedCategory = analysis.suggestedCategory,
                     status = "READY",
                 )
-                withContext(Dispatchers.IO) {
-                    transcriptDao.upsert(readyRecord.toEntity())
-                }
-                if (analysis.extractedNotes.isNotBlank() && !record.notesSavedToContact) {
+                syncEngine.saveTranscriptLocalFirst(readyRecord, enqueueCloudSync = true)
+                if (readyRecord.extractedNotes.isNotBlank() && !record.notesSavedToContact) {
                     saveTranscriptNotesToContact(readyRecord, silent = true)
                 }
                 _statusMessage.value = "تم تفريغ وتحليل مكالمة ${record.contactName} بالذكاء الاصطناعي"
             }.onFailure { err ->
-                withContext(Dispatchers.IO) {
-                    transcriptDao.upsert(
+                if (record.transcript.isNotBlank()) {
+                    val localOnly = LocalTranscriptAnalyzer.analyze(
+                        rawTranscript = record.transcript,
+                        contactName = record.contactName,
+                        phone = record.phone,
+                        referenceTimeMs = record.timestampMs.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                        durationSec = record.durationSec,
+                    )
+                    syncEngine.saveTranscriptLocalFirst(
+                        record.copy(
+                            summaryBullets = localOnly.summaryBullets,
+                            oneLineSummary = localOnly.oneLineSummary,
+                            segments = localOnly.segments,
+                            actionItems = localOnly.actionItems,
+                            highlights = localOnly.highlights,
+                            extractedNotes = localOnly.extractedNotes,
+                            status = "READY",
+                        ),
+                        enqueueCloudSync = true,
+                    )
+                } else {
+                    syncEngine.saveTranscriptLocalFirst(
                         record.copy(
                             status = "ERROR",
                             transcript = err.localizedMessage ?: "تعذر تفريغ التسجيل",
-                        ).toEntity()
+                        ),
+                        enqueueCloudSync = true,
                     )
                 }
             }
@@ -625,10 +768,12 @@ class RabtaViewModel(
             val displayName = contactNameInput.trim().ifBlank {
                 matchedContact?.displayName ?: cleanPhone.ifBlank { "تفريغ صوتي مباشر" }
             }
+            val nowMs = System.currentTimeMillis()
             val analysis = LocalTranscriptAnalyzer.analyze(
                 rawTranscript = clean,
                 contactName = displayName,
                 phone = cleanPhone,
+                referenceTimeMs = nowMs,
             )
             val record = CallTranscriptRecord(
                 id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
@@ -637,17 +782,21 @@ class RabtaViewModel(
                 contactName = displayName,
                 transcript = analysis.transcript,
                 highlights = analysis.highlights,
+                summaryBullets = analysis.summaryBullets,
+                oneLineSummary = analysis.oneLineSummary,
+                segments = analysis.segments,
+                actionItems = analysis.actionItems,
                 extractedNotes = analysis.extractedNotes,
                 suggestedEventTitle = analysis.eventTitle,
                 suggestedEventDateIso = analysis.eventDateIso,
                 suggestedEventEpochMs = analysis.eventEpochMs,
-                timestampMs = System.currentTimeMillis(),
+                timestampMs = nowMs,
                 durationSec = 0L,
                 status = "READY",
+                updatedAtEpochMs = nowMs,
+                syncState = SyncState.PENDING.name,
             )
-            withContext(Dispatchers.IO) {
-                transcriptDao.upsert(record.toEntity())
-            }
+            syncEngine.saveTranscriptLocalFirst(record, enqueueCloudSync = true)
             if (matchedContact != null && analysis.extractedNotes.isNotBlank()) {
                 saveTranscriptNotesToContact(record, silent = true)
             }
@@ -680,21 +829,53 @@ class RabtaViewModel(
                 "$currentNotes\n$snippet"
             }
             val updatedContact = targetContact.copy(notes = updatedNotes.take(2500))
-            withContext(Dispatchers.IO) {
-                contactDao.upsertSingleWithIndexes(ContactEntity.fromDomain(updatedContact))
-                transcriptDao.markNotesSaved(record.id)
-            }
+            syncEngine.saveContactLocalFirst(updatedContact)
+            syncEngine.markTranscriptNotesSaved(record.id)
             if (_selectedContact.value?.id == updatedContact.id) {
                 _selectedContact.value = updatedContact
             }
-            launch { firestoreRepo.upsertContact(currentUserId, updatedContact) }
             if (!silent) _statusMessage.value = "تمت إضافة ملاحظات المكالمة إلى ${updatedContact.displayName}"
         }
     }
 
     fun markCalendarEventAdded(transcriptId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            transcriptDao.markCalendarAdded(transcriptId)
+        viewModelScope.launch {
+            syncEngine.markTranscriptCalendarAdded(transcriptId)
+        }
+    }
+
+    fun softDeleteCallLog(callLogId: String) {
+        viewModelScope.launch {
+            syncEngine.softDeleteCallLogLocalFirst(callLogId)
+        }
+    }
+
+    fun restoreCallLog(callLogId: String) {
+        viewModelScope.launch {
+            syncEngine.restoreCallLogLocalFirst(callLogId)
+        }
+    }
+
+    fun softDeleteTranscript(transcriptId: String) {
+        viewModelScope.launch {
+            syncEngine.softDeleteTranscriptLocalFirst(transcriptId)
+            refreshRecordings()
+            _statusMessage.value = "تم حذف التسجيل والملخص من الخزنة"
+        }
+    }
+
+    fun toggleTranscriptActionItem(transcriptId: String, actionItemId: String) {
+        viewModelScope.launch {
+            val current = withContext(Dispatchers.IO) {
+                transcriptDao.getById(transcriptId)?.toDomain()
+            } ?: return@launch
+            val updatedItems = current.actionItems.map { item ->
+                if (item.id == actionItemId) item.copy(completed = !item.completed) else item
+            }
+            syncEngine.saveTranscriptLocalFirst(
+                record = current.copy(actionItems = updatedItems),
+                enqueueCloudSync = true,
+            )
         }
     }
 
@@ -763,25 +944,7 @@ class RabtaViewModel(
         _statusMessage.value = "تم تفريغ سلة الأرقام المحذوفة"
     }
 
-    private fun CallTranscriptRecord.toEntity(): CallTranscriptEntity = CallTranscriptEntity(
-        id = id,
-        contactId = contactId,
-        phone = phone,
-        contactName = contactName,
-        audioFilePath = audioFilePath,
-        timestampMs = timestampMs,
-        durationSec = durationSec,
-        transcript = transcript,
-        highlightsJoined = highlights.joinToString("\u001F"),
-        extractedNotes = extractedNotes,
-        suggestedEventTitle = suggestedEventTitle,
-        suggestedEventDateIso = suggestedEventDateIso,
-        suggestedEventEpochMs = suggestedEventEpochMs,
-        suggestedCategory = suggestedCategory,
-        eventAddedToCalendar = eventAddedToCalendar,
-        notesSavedToContact = notesSavedToContact,
-        status = status,
-    )
+    private fun CallTranscriptRecord.toEntity(): CallTranscriptEntity = CallTranscriptEntity.fromDomain(this)
 
     fun clearStatusMessage() {
         _statusMessage.value = null
@@ -838,6 +1001,8 @@ class RabtaViewModel(
                 val (freq, recent) = callLogReader.loadFrequentAndRecentCalls()
                 _frequentCalls.value = freq
                 _recentCalls.value = recent
+                val entities = callLogReader.readDeviceCallLogsAsEntities(limit = 250)
+                syncEngine.ingestDeviceCallLogsIntoLocalDb(entities)
             }
         }
     }
@@ -847,29 +1012,36 @@ class RabtaViewModel(
         searchJob?.cancel()
         if (query.trim().isEmpty()) {
             _searchResults.value = emptyList()
+            _globalSearchResult.value = GlobalSearchResult()
             return
         }
         searchJob = viewModelScope.launch {
             delay(150L)
-            val cleaned = ContactEntity.normalizeForSearch(query.trim())
-            val results = withContext(Dispatchers.IO) {
-                contactDao.searchContacts(cleaned, limit = 80, offset = 0).map { it.toDomain() }
-            }
-            _searchResults.value = results
+            val global = syncEngine.searchGlobal(query)
+            _globalSearchResult.value = global
+            _searchResults.value = global.contacts
         }
     }
 
     fun searchForDialpad(query: String) {
         dialpadJob?.cancel()
-        val trimmed = ContactEntity.normalizeForSearch(query.trim())
+        val raw = query.trim()
+        val trimmed = ContactEntity.normalizeForSearch(raw)
         if (trimmed.isEmpty()) {
             _dialpadMatches.value = emptyList()
             return
         }
         dialpadJob = viewModelScope.launch {
-            delay(100L)
+            delay(80L)
             val results = withContext(Dispatchers.IO) {
-                contactDao.searchContacts(trimmed, limit = 15, offset = 0).map { it.toDomain() }
+                val roomHits = contactDao.searchContacts(trimmed, limit = 15, offset = 0).map { it.toDomain() }
+                val cachedList = allContactsAlphabetical.value
+                val t9Hits = if (cachedList.isNotEmpty()) {
+                    T9SearchMatcher.filterAndRank(raw, cachedList, limit = 15)
+                } else {
+                    emptyList()
+                }
+                (t9Hits + roomHits).distinctBy { it.id }.take(15)
             }
             _dialpadMatches.value = results
         }
@@ -931,12 +1103,7 @@ class RabtaViewModel(
         if (segments.isEmpty()) return
         viewModelScope.launch {
             val nodes = buildCategoryNodes(setOf(segments.joinToString(" > ")))
-            withContext(Dispatchers.IO) {
-                categoryDao.upsertAll(nodes.map {
-                    CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
-                })
-            }
-            launch { firestoreRepo.upsertCategories(currentUserId, nodes) }
+            syncEngine.saveCategoriesLocalFirst(nodes)
             loadCategoryLevel(_currentCategoryPath.value)
             _statusMessage.value = "تم إنشاء الفئة بنجاح"
         }
@@ -944,6 +1111,7 @@ class RabtaViewModel(
 
     fun openContact(contact: ContactRecord) {
         _selectedContact.value = contact
+        loadPreCallContext(contact.id, contact.primaryPhone.ifBlank { contact.phones.firstOrNull().orEmpty() })
     }
 
     fun closeContact() {
@@ -953,7 +1121,7 @@ class RabtaViewModel(
     fun saveContact(contact: ContactRecord, syncToCloud: Boolean = true) {
         viewModelScope.launch {
             val id = contact.id.ifBlank { "c_" + UUID.randomUUID().toString().replace("-", "").take(16) }
-            val incoming = ContactDeduplicator.enrichSingleContact(contact.copy(id = id))
+            val incoming = ContactDeduplicator.enrichSingleContact(contact.copy(id = id, syncedToDevice = false))
             val phoneKeys = incoming.phones
                 .map { PhoneUtils.phoneSearchKey(it) }
                 .filter { it.length >= 7 }
@@ -975,33 +1143,23 @@ class RabtaViewModel(
                 if (existingMatches.isNotEmpty()) {
                     didMergeDuplicate = true
                     val dedup = ContactDeduplicator.deduplicateAndMerge(existingMatches + incoming)
-                    mergedWinner = dedup.mergedContacts.firstOrNull() ?: incoming
+                    mergedWinner = (dedup.mergedContacts.firstOrNull() ?: incoming).copy(syncedToDevice = false)
                     supersededIds = (dedup.supersededIds + incoming.id + existingMatches.map { it.id })
                         .filter { it != mergedWinner.id }
                         .distinct()
-                    if (supersededIds.isNotEmpty()) {
-                        contactDao.deleteContactsWithIndexes(supersededIds)
-                    }
                 }
-
-                contactDao.upsertSingleWithIndexes(ContactEntity.fromDomain(mergedWinner))
                 if (mergedWinner.categoryPaths.isNotEmpty()) {
                     catNodesToSync = buildCategoryNodes(mergedWinner.categoryPaths.toSet())
-                    categoryDao.upsertAll(catNodesToSync.map {
-                        CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
-                    })
                 }
             }
 
-            if (syncToCloud) {
-                if (catNodesToSync.isNotEmpty()) {
-                    launch { firestoreRepo.upsertCategories(currentUserId, catNodesToSync) }
-                }
-                if (supersededIds.isNotEmpty()) {
-                    launch { firestoreRepo.batchDeleteContacts(currentUserId, supersededIds) }
-                }
-                launch { firestoreRepo.upsertContact(currentUserId, mergedWinner) }
-            }
+            syncEngine.saveContactLocalFirst(
+                contact = mergedWinner,
+                categories = catNodesToSync,
+                supersededIds = supersededIds,
+                syncToCloud = syncToCloud,
+            )
+
             if (_selectedContact.value?.id == mergedWinner.id || supersededIds.contains(_selectedContact.value?.id)) {
                 _selectedContact.value = mergedWinner
             }
@@ -1021,8 +1179,7 @@ class RabtaViewModel(
 
     fun deleteContact(contact: ContactRecord) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { contactDao.deleteContactWithIndexes(contact.id) }
-            launch { firestoreRepo.deleteContact(currentUserId, contact.id) }
+            syncEngine.softDeleteContactLocalFirst(contact.id)
             if (_selectedContact.value?.id == contact.id) {
                 _selectedContact.value = null
             }
@@ -1036,8 +1193,7 @@ class RabtaViewModel(
     fun toggleFavorite(contact: ContactRecord) {
         val next = !contact.isFavorite
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { contactDao.updateFavoriteFlag(contact.id, next) }
-            launch { firestoreRepo.setContactFavorite(currentUserId, contact.id, next) }
+            syncEngine.toggleFavoriteLocalFirst(contact.id, next)
             if (_selectedContact.value?.id == contact.id) {
                 _selectedContact.value = contact.copy(isFavorite = next)
             }
@@ -1046,116 +1202,56 @@ class RabtaViewModel(
         }
     }
 
+    fun toggleBlocked(contact: ContactRecord) {
+        val next = !contact.blocked
+        viewModelScope.launch {
+            syncEngine.toggleBlockedLocalFirst(contact.id, next)
+            if (_selectedContact.value?.id == contact.id) {
+                _selectedContact.value = contact.copy(blocked = next)
+            }
+            _statusMessage.value = if (next) "تم حظر ${contact.displayName}" else "تم إلغاء حظر ${contact.displayName}"
+        }
+    }
+
+    fun toggleMuted(contact: ContactRecord) {
+        val next = !contact.muted
+        viewModelScope.launch {
+            syncEngine.toggleMutedLocalFirst(contact.id, next)
+            if (_selectedContact.value?.id == contact.id) {
+                _selectedContact.value = contact.copy(muted = next)
+            }
+            _statusMessage.value = if (next) "تم كتم إشعارات ${contact.displayName}" else "تم تفعيل إشعارات ${contact.displayName}"
+        }
+    }
+
     fun launchWhatsAppAndLog(contact: ContactRecord, phone: String, prefillMessage: String? = null) {
         val now = System.currentTimeMillis()
         viewModelScope.launch {
             val logId = "wa_" + UUID.randomUUID().toString().replace("-", "").take(16)
-            val entity = WhatsAppLogEntity(
-                id = logId,
-                contactId = contact.id,
-                contactName = contact.displayName,
-                phone = phone,
-                loggedAtEpochMs = now,
-                syncedToPhone = contact.syncedToDevice,
+            syncEngine.saveWhatsAppLogLocalFirst(
+                WhatsAppLog(
+                    id = logId,
+                    contactId = contact.id,
+                    contactName = contact.displayName,
+                    phone = phone,
+                    loggedAtEpochMs = now,
+                    syncedToPhone = false,
+                )
             )
-            withContext(Dispatchers.IO) { logDao.insert(entity) }
-            launch { firestoreRepo.createWhatsAppLog(currentUserId, entity.toDomain()) }
         }
         SystemIntents.openWhatsApp(appContext, phone, prefillMessage)
     }
 
-    fun toggleDeviceContactSync(contact: ContactRecord) {
-        viewModelScope.launch {
-            if (!contact.syncedToDevice && strictPhonebookIsolation.value) {
-                _statusMessage.value = "وضع الفصل الكامل عن سجل الهاتف مفعّل. عطّله من الإعدادات إذا أردت الحفظ بالهاتف."
-                return@launch
-            }
-            if (!deviceContactsManager.hasPermissions()) {
-                _statusMessage.value = "يرجى منح صلاحية جهات الاتصال للمزامنة الانتقائية"
-                return@launch
-            }
-            val result = if (contact.syncedToDevice) {
-                deviceContactsManager.removeContactFromPhonebook(contact).map { false }
-            } else {
-                deviceContactsManager.syncContactToPhonebook(contact).map { true }
-            }
-            result.onSuccess { nowSynced ->
-                withContext(Dispatchers.IO) { contactDao.updateSyncedFlag(contact.id, nowSynced) }
-                launch { firestoreRepo.setContactSyncedToDevice(currentUserId, contact.id, nowSynced) }
-                if (_selectedContact.value?.id == contact.id) {
-                    _selectedContact.value = contact.copy(syncedToDevice = nowSynced)
-                }
-                _statusMessage.value = if (nowSynced) {
-                    "تم حفظ ${contact.displayName} في الهاتف ليتعرف عليه واتساب"
-                } else {
-                    "تمت إزالة ${contact.displayName} من سجل الهاتف مع بقائه في Felo Contacts"
-                }
-            }.onFailure {
-                _statusMessage.value = "تعذرت المزامنة: ${it.localizedMessage}"
-            }
-        }
+    fun toggleDeviceContactSync(@Suppress("UNUSED_PARAMETER") contact: ContactRecord) {
+        _statusMessage.value = "وضع العزل الكامل مفعّل دائماً: جهات الاتصال محمية داخل التطبيق فقط ولا تُزامن مع سجل الهاتف أو واتساب."
     }
 
     fun syncWeeklyActiveWhatsAppToPhonebook() {
-        viewModelScope.launch {
-            if (strictPhonebookIsolation.value) {
-                _statusMessage.value = "تم حظر المزامنة للهاتف للحفاظ على الفصل الكامل عن جهات اتصال الموبايل وواتساب."
-                return@launch
-            }
-            if (!deviceContactsManager.hasPermissions()) {
-                _statusMessage.value = "يرجى منح صلاحية جهات الاتصال أولاً"
-                return@launch
-            }
-            _isBusy.value = true
-            try {
-                val since = System.currentTimeMillis() - SEVEN_DAYS_MS
-                val recentLogs = withContext(Dispatchers.IO) { logDao.getLogsSince(since) }
-                val uniqueContactIds = recentLogs.map { it.contactId }.distinct()
-                val contacts = withContext(Dispatchers.IO) { contactDao.getByIds(uniqueContactIds) }.map { it.toDomain() }
-                var syncedCount = 0
-                for (c in contacts) {
-                    val res = deviceContactsManager.syncContactToPhonebook(c)
-                    if (res.getOrDefault(false)) {
-                        syncedCount++
-                        withContext(Dispatchers.IO) {
-                            contactDao.updateSyncedFlag(c.id, true)
-                            logDao.markSyncedByContact(c.id)
-                        }
-                        launch { firestoreRepo.setContactSyncedToDevice(currentUserId, c.id, true) }
-                    }
-                }
-                _statusMessage.value = "تمت مزامنة $syncedCount من نشطي واتساب آخر 7 أيام إلى الهاتف"
-            } finally {
-                _isBusy.value = false
-            }
-        }
+        _statusMessage.value = "وضع العزل الكامل مفعّل دائماً: لا يتم تصدير أي أرقام إلى سجل الهاتف أو واتساب."
     }
 
     fun purgeAllSyncedContactsFromPhonebook() {
-        viewModelScope.launch {
-            val syncedList = syncedDeviceContacts.value
-            if (syncedList.isEmpty()) {
-                _statusMessage.value = "لا توجد أي أرقام متزامنة مع سجل الهاتف — كل بياناتك معزولة بالفعل."
-                return@launch
-            }
-            if (!deviceContactsManager.hasPermissions()) {
-                _statusMessage.value = "يرجى منح صلاحية جهات الاتصال لإزالة الأرقام المتزامنة سابقاً من الهاتف."
-                return@launch
-            }
-            _isBusy.value = true
-            try {
-                var removed = 0
-                for (c in syncedList) {
-                    deviceContactsManager.removeContactFromPhonebook(c)
-                    withContext(Dispatchers.IO) { contactDao.updateSyncedFlag(c.id, false) }
-                    launch { firestoreRepo.setContactSyncedToDevice(currentUserId, c.id, false) }
-                    removed++
-                }
-                _statusMessage.value = "تم فصل وإزالة $removed رقم من سجل الهاتف مع الإبقاء عليها كاملة داخل Felo Contacts"
-            } finally {
-                _isBusy.value = false
-            }
-        }
+        _statusMessage.value = "كل جهات اتصالك معزولة بالكامل داخل Felo Contacts ولا توجد أرقام متزامنة مع الهاتف."
     }
 
     fun importBundledDatasets(uploadToCloud: Boolean = true) {
@@ -1231,19 +1327,35 @@ class RabtaViewModel(
     fun importFromUri(uri: Uri, fileName: String?, uploadToCloud: Boolean = true) {
         viewModelScope.launch {
             _isBusy.value = true
-            _importProgressText.value = "جاري تحليل الملف..."
+            _importProgressText.value = "جاري تحليل الملف المعزول..."
             try {
                 val parsed = withContext(Dispatchers.IO) {
                     appContext.contentResolver.openInputStream(uri)?.use { stream ->
                         val text = stream.bufferedReader().readText()
-                        CsvParser.parseArbitrarySheetOrText(text, fileName ?: "ملف مستورد")
+                        val trimmed = text.trimStart()
+                        val looksJson = (fileName?.endsWith(".json", ignoreCase = true) == true) ||
+                            trimmed.startsWith("{") || trimmed.startsWith("[")
+                        if (looksJson) {
+                            val jsonContacts = JsonContactExporter.parseFromJson(text).getOrElse { emptyList() }
+                            if (jsonContacts.isNotEmpty()) {
+                                val cats = LinkedHashSet<String>()
+                                jsonContacts.forEach { c ->
+                                    c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, cats) }
+                                }
+                                CsvParser.ParsedDataset(jsonContacts, 0, cats)
+                            } else {
+                                CsvParser.parseArbitrarySheetOrText(text, fileName ?: "ملف مستورد")
+                            }
+                        } else {
+                            CsvParser.parseArbitrarySheetOrText(text, fileName ?: "ملف مستورد")
+                        }
                     } ?: CsvParser.ParsedDataset(emptyList(), 0, emptySet())
                 }
                 if (parsed.contacts.isEmpty()) {
                     _statusMessage.value = "لم يتم العثور على جهات اتصال صالحة في الملف"
                 } else {
                     val result = persistImportedDataset(parsed.contacts, parsed.categoryPaths, uploadToCloud)
-                    _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال بنجاح"
+                    _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال داخل القاعدة المعزولة بنجاح"
                 }
             } catch (e: Exception) {
                 _statusMessage.value = "تعذر قراءة الملف: ${e.localizedMessage}"
@@ -1252,6 +1364,45 @@ class RabtaViewModel(
                 _importProgressText.value = null
             }
         }
+    }
+
+    fun scanDuplicateClusters() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val total = contactDao.getTotalCount()
+            val allDomains = ArrayList<ContactRecord>(total)
+            var offset = 0
+            while (true) {
+                val page = contactDao.getRecentOrAllPage(limit = 1000, offset = offset)
+                if (page.isEmpty()) break
+                page.forEach { allDomains += it.toDomain() }
+                offset += page.size
+            }
+            _duplicateClusters.value = ContactDeduplicator.findDuplicateClusters(allDomains)
+        }
+    }
+
+    fun mergeDuplicateCluster(cluster: List<ContactRecord>) {
+        if (cluster.size < 2) return
+        viewModelScope.launch {
+            val dedup = ContactDeduplicator.deduplicateAndMerge(cluster, enforceBilingual = true)
+            val winner = dedup.mergedContacts.firstOrNull() ?: return@launch
+            val droppedIds = cluster.map { it.id }.filter { it.isNotBlank() && it != winner.id }
+            val cats = buildCategoryNodes(winner.categoryPaths.toSet())
+            syncEngine.saveContactLocalFirst(
+                contact = winner,
+                categories = cats,
+                supersededIds = droppedIds,
+                syncToCloud = true,
+            )
+            _duplicateClusters.value = _duplicateClusters.value.filterNot { it == cluster }
+            loadCategoryLevel(_currentCategoryPath.value)
+            _statusMessage.value = "تم دمج ${cluster.size} سجلات في ${winner.displayName}"
+        }
+    }
+
+    fun mergeAllDuplicateClusters() {
+        reorganizeAllCategories()
+        _duplicateClusters.value = emptyList()
     }
 
     /**
@@ -1281,27 +1432,23 @@ class RabtaViewModel(
                         c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, allCatPaths) }
                     }
                     val catNodes = buildCategoryNodes(allCatPaths)
-                    val catEntities = catNodes.map {
-                        CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
-                    }
-                    val updatedEntities = dedup.mergedContacts.map { ContactEntity.fromDomain(it) }
+                    val mergedCount = dedup.mergedContacts.size
 
                     contactDao.clearCategoryRefs()
                     contactDao.clearPhoneKeys()
                     contactDao.clearAll()
                     categoryDao.clearAll()
-                    contactDao.upsertBatchWithIndexes(updatedEntities, catEntities, categoryDao)
-                    Triple(dedup, catNodes, updatedEntities.size)
+
+                    syncEngine.saveContactsBatchLocalFirst(
+                        contacts = dedup.mergedContacts,
+                        categories = catNodes,
+                        supersededIds = dedup.supersededIds,
+                        syncToCloud = true,
+                    )
+                    Triple(dedup, catNodes, mergedCount)
                 }
 
                 val dedup = outcome.first
-                val catNodes = outcome.second
-                if (dedup.supersededIds.isNotEmpty()) {
-                    launch { firestoreRepo.batchDeleteContacts(currentUserId, dedup.supersededIds) }
-                }
-                if (catNodes.isNotEmpty()) {
-                    launch { firestoreRepo.upsertCategories(currentUserId, catNodes) }
-                }
                 loadCategoryLevel("")
                 if (_searchQuery.value.isNotBlank()) updateSearchQuery(_searchQuery.value)
                 refreshCallLogs()
@@ -1349,18 +1496,15 @@ class RabtaViewModel(
             Triple(fullDedup.mergedContacts, fullDedup.supersededIds, catSet)
         }
 
-        val entities = finalMerged.map { ContactEntity.fromDomain(it) }
+        val entitiesCount = finalMerged.size
         val catNodes = buildCategoryNodes(allCats)
-        val catEntities = catNodes.map {
-            CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
-        }
 
-        withContext(Dispatchers.IO) {
-            if (supersededIds.isNotEmpty()) {
-                contactDao.deleteContactsWithIndexes(supersededIds)
-            }
-            contactDao.upsertBatchWithIndexes(entities, catEntities, categoryDao)
-        }
+        syncEngine.saveContactsBatchLocalFirst(
+            contacts = finalMerged,
+            categories = catNodes,
+            supersededIds = supersededIds,
+            syncToCloud = uploadToCloud,
+        )
 
         loadCategoryLevel(_currentCategoryPath.value)
         refreshCallLogs()
@@ -1369,23 +1513,14 @@ class RabtaViewModel(
         if (uploadToCloud && finalMerged.isNotEmpty()) {
             cloudUploadJob?.cancel()
             cloudUploadJob = viewModelScope.launch {
-                _cloudSyncStatus.value = "نسخ احتياطي سحابي في الخلفية (0 / ${finalMerged.size})..."
-                runCatching {
-                    if (supersededIds.isNotEmpty()) {
-                        firestoreRepo.batchDeleteContacts(currentUserId, supersededIds)
-                    }
-                    firestoreRepo.upsertCategories(currentUserId, catNodes)
-                    firestoreRepo.batchUpsertContacts(currentUserId, finalMerged) { done, total ->
-                        _cloudSyncStatus.value = "النسخ السحابي في الخلفية ($done / $total)"
-                    }
-                    prefs.setLastSyncMs(System.currentTimeMillis())
-                }
+                _cloudSyncStatus.value = "مزامنة ثنائية الاتجاه في الخلفية..."
+                syncEngine.syncNow(currentUserId)
                 _cloudSyncStatus.value = null
             }
         }
 
         return CsvImportSummary(
-            importedCount = finalMerged.size,
+            importedCount = entitiesCount,
             skippedCount = supersededIds.size,
             categoriesCreated = catNodes.size,
             geoMatchedCount = finalMerged.count { it.latitude != null },
@@ -1666,13 +1801,11 @@ class RabtaViewModel(
                 }
 
                 val catNodes = buildCategoryNodes(newCatPaths)
-                withContext(Dispatchers.IO) {
-                    contactDao.upsertBatchWithIndexes(
-                        contacts = updatedContacts.map { ContactEntity.fromDomain(it) },
-                        catEntities = catNodes.map { CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey) },
-                        categoryDao = categoryDao,
-                    )
-                }
+                syncEngine.saveContactsBatchLocalFirst(
+                    contacts = updatedContacts,
+                    categories = catNodes,
+                    syncToCloud = true,
+                )
                 loadCategoryLevel(_currentCategoryPath.value)
                 _aiUiState.value = AiAssistantUiState.Success(
                     reply = if (usedLocalFallback) {
@@ -1757,13 +1890,11 @@ class RabtaViewModel(
                     }
                 }
                 if (updated.isNotEmpty()) {
-                    withContext(Dispatchers.IO) {
-                        contactDao.upsertBatchWithIndexes(
-                            contacts = updated.map { ContactEntity.fromDomain(it) },
-                            catEntities = emptyList(),
-                            categoryDao = categoryDao,
-                        )
-                    }
+                    syncEngine.saveContactsBatchLocalFirst(
+                        contacts = updated,
+                        categories = emptyList(),
+                        syncToCloud = true,
+                    )
                     if (_searchQuery.value.isNotBlank()) updateSearchQuery(_searchQuery.value)
                     loadCategoryLevel(_currentCategoryPath.value)
                 }
@@ -1826,7 +1957,7 @@ class RabtaViewModel(
                 when {
                     selectedIds.isNotEmpty() -> contactDao.getByIds(selectedIds.toList()).map { it.toDomain() }
                     _currentCategoryPath.value.isNotBlank() -> _categoryContacts.value
-                    else -> _searchResults.value.ifEmpty { favoriteContacts.value }
+                    else -> allContactsAlphabetical.value.ifEmpty { favoriteContacts.value }
                 }
             }
             if (contacts.isEmpty()) {
@@ -1836,19 +1967,47 @@ class RabtaViewModel(
             if (asVCard) {
                 SystemIntents.shareExportFile(
                     appContext,
-                    "rabta_contacts_${contacts.size}.vcf",
+                    "felo_contacts_${contacts.size}.vcf",
                     "text/x-vcard",
                     VCardUtils.exportAll(contacts),
                 )
             } else {
                 SystemIntents.shareExportFile(
                     appContext,
-                    "rabta_contacts_${contacts.size}.csv",
+                    "felo_contacts_${contacts.size}.csv",
                     "text/csv",
                     CsvParser.exportToCsv(contacts),
                 )
             }
             clearBulkSelection()
+        }
+    }
+
+    fun exportAllContactsAsJson() {
+        viewModelScope.launch {
+            val contacts = withContext(Dispatchers.IO) {
+                val total = contactDao.getTotalCount()
+                val all = ArrayList<ContactRecord>(total)
+                var offset = 0
+                while (true) {
+                    val page = contactDao.getRecentOrAllPage(limit = 1000, offset = offset)
+                    if (page.isEmpty()) break
+                    page.forEach { all += it.toDomain() }
+                    offset += page.size
+                }
+                all
+            }
+            if (contacts.isEmpty()) {
+                _statusMessage.value = "لا توجد جهات اتصال لتصديرها"
+                return@launch
+            }
+            val payload = JsonContactExporter.exportToJson(contacts)
+            SystemIntents.shareExportFile(
+                appContext,
+                "felo_contacts_isolated_${contacts.size}.json",
+                "application/json",
+                payload,
+            )
         }
     }
 
@@ -1861,18 +2020,14 @@ class RabtaViewModel(
                 urlTemplate = urlTemplate.trim(),
                 isDefault = false,
             )
-            withContext(Dispatchers.IO) {
-                paymentDao.upsert(PaymentTemplateEntity(tpl.id, tpl.name, tpl.urlTemplate, false))
-            }
-            launch { firestoreRepo.upsertPaymentTemplate(currentUserId, tpl) }
+            syncEngine.savePaymentTemplateLocalFirst(tpl)
             _statusMessage.value = "تمت إضافة خدمة الدفع: ${tpl.name}"
         }
     }
 
     fun deletePaymentTemplate(templateId: String) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { paymentDao.deleteById(templateId) }
-            launch { firestoreRepo.deletePaymentTemplate(currentUserId, templateId) }
+            syncEngine.deletePaymentTemplateLocalFirst(templateId)
         }
     }
 

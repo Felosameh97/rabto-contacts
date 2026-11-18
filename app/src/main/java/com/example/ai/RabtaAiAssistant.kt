@@ -360,6 +360,10 @@ class RabtaAiAssistant {
     data class CallAnalysisResult(
         val transcript: String,
         val highlights: List<String>,
+        val summaryBullets: List<String>,
+        val oneLineSummary: String,
+        val actionItems: List<com.example.domain.model.CallActionItem>,
+        val segments: List<com.example.domain.model.TranscriptSegment>,
         val extractedNotes: String,
         val eventTitle: String,
         val eventDateIso: String,
@@ -370,16 +374,54 @@ class RabtaAiAssistant {
     private val callAnalysisSchema = Schema.obj(
         properties = mapOf(
             "transcript" to Schema.string(description = "Full accurate transcription of the phone call in the original spoken language (Arabic/English)"),
+            "summaryBullets" to Schema.array(
+                items = Schema.string(),
+                description = "Exactly 3 concise Arabic bullet points summarizing what happened in the call",
+            ),
+            "oneLineSummary" to Schema.string(description = "Single concise Arabic headline (max 90 chars) summarizing the call outcome"),
             "highlights" to Schema.array(
                 items = Schema.string(),
                 description = "2 to 5 concise bullet highlights (commitments, amounts, locations, important details)",
+            ),
+            "actionItems" to Schema.array(
+                items = Schema.obj(
+                    properties = mapOf(
+                        "title" to Schema.string(description = "Actionable follow-up task, promise, deadline, or payment"),
+                        "dueDateIso" to Schema.string(description = "Optional due date/time in yyyy-MM-dd HH:mm, or empty string"),
+                        "kind" to Schema.enumeration(
+                            values = listOf("CALENDAR", "PAYMENT", "FOLLOW_UP", "TASK"),
+                            description = "Category of the follow-up item",
+                        ),
+                    ),
+                    optionalProperties = listOf("dueDateIso"),
+                ),
+                description = "Follow-ups, promises, dates, or payment tasks extracted from the call",
+            ),
+            "segments" to Schema.array(
+                items = Schema.obj(
+                    properties = mapOf(
+                        "startMs" to Schema.integer(description = "Approximate segment start time in milliseconds"),
+                        "endMs" to Schema.integer(description = "Approximate segment end time in milliseconds"),
+                        "speaker" to Schema.string(description = "Speaker label, e.g. 'أنت' or caller name"),
+                        "text" to Schema.string(description = "Spoken sentence or turn text"),
+                    ),
+                ),
+                description = "Time-aligned conversation turns for interactive playback highlighting",
             ),
             "extractedNotes" to Schema.string(description = "Organized summary note to append to the contact record"),
             "eventTitle" to Schema.string(description = "Short calendar event title if an appointment/meeting/reminder was mentioned, otherwise empty string"),
             "eventDateIso" to Schema.string(description = "Local date-time in 'yyyy-MM-dd HH:mm' format relative to current timestamp if an event was mentioned, otherwise empty string"),
             "suggestedCategory" to Schema.string(description = "Optional nested Arabic category suggestion using ' > '"),
         ),
-        optionalProperties = listOf("eventTitle", "eventDateIso", "suggestedCategory"),
+        optionalProperties = listOf(
+            "summaryBullets",
+            "oneLineSummary",
+            "actionItems",
+            "segments",
+            "eventTitle",
+            "eventDateIso",
+            "suggestedCategory",
+        ),
     )
 
     private val callAnalysisModel by lazy {
@@ -429,10 +471,14 @@ class RabtaAiAssistant {
                         appendLine()
                         appendLine("المطلوب إرجاع JSON منظم يشمل:")
                         appendLine("1) transcript: النص الكامل للمكالمة.")
-                        appendLine("2) highlights: أهم النقاط والمواعيد والأرقام والالتزامات (2-5 جمل قصيرة).")
-                        appendLine("3) extractedNotes: ملاحظات منظمة ومختصرة لحفظها داخل ملف جهة الاتصال.")
-                        appendLine("4) eventTitle و eventDateIso: إذا ذُكر موعد أو تذكير (مثلاً 'بكرة عندنا كذا' أو 'يوم الخميس الساعة 5')، استخرج عنوان الحدث وتاريخه بصيغة yyyy-MM-dd HH:mm، وإلا اتركهما فارغين.")
-                        appendLine("5) suggestedCategory: اقتراح تصنيف مناسب لجهة الاتصال إن وضح من المكالمة.")
+                        appendLine("2) summaryBullets: 3 نقاط عربية مختصرة وواضحة تلخص المكالمة.")
+                        appendLine("3) oneLineSummary: ملخص من سطر واحد للنتيجة أو الغرض.")
+                        appendLine("4) highlights: أهم النقاط والمواعيد والأرقام والالتزامات (2-5 جمل قصيرة).")
+                        appendLine("5) actionItems: قائمة المهام والوعود والمواعيد والتحويلات المالية المستخلصة.")
+                        appendLine("6) segments: تقسيم الحوار إلى مقاطع زمنية متتالية بالملي ثانية (startMs, endMs, speaker, text).")
+                        appendLine("7) extractedNotes: ملاحظات منظمة ومختصرة لحفظها داخل ملف جهة الاتصال.")
+                        appendLine("8) eventTitle و eventDateIso: إذا ذُكر موعد أو تذكير، استخرج عنوان الحدث وتاريخه بصيغة yyyy-MM-dd HH:mm، وإلا اتركهما فارغين.")
+                        appendLine("9) suggestedCategory: اقتراح تصنيف مناسب لجهة الاتصال إن وضح من المكالمة.")
                     }
                 )
             }
@@ -460,11 +506,73 @@ class RabtaAiAssistant {
                     }
                 }
             }
+            val bulletsArr = json.optJSONArray("summaryBullets")
+            val summaryBullets = buildList {
+                if (bulletsArr != null) {
+                    for (i in 0 until bulletsArr.length()) {
+                        val b = bulletsArr.optString(i).trim()
+                        if (b.isNotBlank()) add(b)
+                    }
+                }
+            }.take(3)
+
+            val actionsArr = json.optJSONArray("actionItems")
+            val stamp = System.currentTimeMillis() % 100000L
+            val actionItems = buildList {
+                if (actionsArr != null) {
+                    for (i in 0 until actionsArr.length()) {
+                        val obj = actionsArr.optJSONObject(i) ?: continue
+                        val title = obj.optString("title").trim()
+                        if (title.isBlank()) continue
+                        val dueIso = obj.optString("dueDateIso").trim()
+                        val kind = obj.optString("kind", "TASK").trim().ifBlank { "TASK" }
+                        add(
+                            com.example.domain.model.CallActionItem(
+                                id = "gem_act_${i}_$stamp",
+                                title = title.take(160),
+                                dueDateIso = dueIso,
+                                dueEpochMs = parseIsoDateToEpochMs(dueIso),
+                                kind = kind,
+                                completed = false,
+                            )
+                        )
+                    }
+                }
+            }
+
+            val segArr = json.optJSONArray("segments")
+            val segments = buildList {
+                if (segArr != null) {
+                    for (i in 0 until segArr.length()) {
+                        val obj = segArr.optJSONObject(i) ?: continue
+                        val text = obj.optString("text").trim()
+                        if (text.isBlank()) continue
+                        val startMs = obj.optLong("startMs", i * 3500L).coerceAtLeast(0L)
+                        val endMs = obj.optLong("endMs", startMs + 3500L).coerceAtLeast(startMs + 500L)
+                        val speaker = obj.optString("speaker").trim().ifBlank {
+                            if (i % 2 == 0) contactName.ifBlank { "المتصل" } else "أنت"
+                        }
+                        add(
+                            com.example.domain.model.TranscriptSegment(
+                                startMs = startMs,
+                                endMs = endMs,
+                                speaker = speaker,
+                                text = text,
+                            )
+                        )
+                    }
+                }
+            }
+
             val eventDateIso = json.optString("eventDateIso", "").trim()
             Result.success(
                 CallAnalysisResult(
                     transcript = json.optString("transcript", "").trim(),
                     highlights = highlights,
+                    summaryBullets = summaryBullets,
+                    oneLineSummary = json.optString("oneLineSummary", "").trim(),
+                    actionItems = actionItems,
+                    segments = segments,
                     extractedNotes = json.optString("extractedNotes", "").trim(),
                     eventTitle = json.optString("eventTitle", "").trim(),
                     eventDateIso = eventDateIso,

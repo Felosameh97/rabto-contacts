@@ -1,24 +1,44 @@
 package com.example
 
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.telecom.Call
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.FolderCopy
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.CallEnd
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.CloudSync
+import androidx.compose.material.icons.rounded.Contacts
+import androidx.compose.material.icons.rounded.Dialpad
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.GraphicEq
-import androidx.compose.material.icons.rounded.Home
-import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -27,14 +47,18 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -42,11 +66,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -67,21 +95,36 @@ import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
 import com.example.data.remote.FirestoreContactsRepository
 import com.example.data.remote.GitHubUpdateService
+import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
+import com.example.domain.model.SyncEngineState
+import com.example.domain.model.SyncStatusBadge
+import com.example.telecom.ActiveCallUiState
+import com.example.telecom.InCallActivity
+import com.example.telecom.RabtaInCallService
 import com.example.ui.components.AiAssistantSheet
+import com.example.ui.components.AppLockScreen
 import com.example.ui.components.ContactDetailBottomSheet
 import com.example.ui.components.ContactEditorDialog
+import com.example.ui.components.DuplicateMergeDialog
 import com.example.ui.components.LiveTranscriberSheet
 import com.example.ui.components.QrScannerDialog
+import com.example.ui.components.TranscriptQuickDialog
 import com.example.ui.components.WhatsAppCaptureDialog
+import com.example.ui.screens.AiVaultScreen
 import com.example.ui.screens.AuthScreen
 import com.example.ui.screens.CategoriesScreen
-import com.example.ui.screens.HomeScreen
+import com.example.ui.screens.ContactsScreen
+import com.example.ui.screens.KeypadScreen
+import com.example.ui.screens.RecentsScreen
 import com.example.ui.screens.ToolsSyncScreen
 import com.example.ui.theme.CalmPalette
+import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.RabtaContactsTheme
 import com.example.ui.theme.ThemeMode
+import com.example.ui.theme.WhatsAppGreen
 import com.example.ui.viewmodel.RabtaViewModel
+import com.example.util.AppLockSecurity
 import com.example.util.FollowUpReminderScheduler
 import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
@@ -91,11 +134,15 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 
-@Serializable object RouteHome
+@Serializable object RouteKeypad
+@Serializable object RouteRecents
+@Serializable object RouteContacts
+@Serializable object RouteAiVault
 @Serializable object RouteCategories
-@Serializable object RouteTools
+@Serializable object RouteSettings
 
 class MainActivity : ComponentActivity() {
     private var incomingShareText by mutableStateOf<String?>(null)
@@ -247,17 +294,26 @@ private fun AuthenticatedMainScreen(
                 val databaseId = app.getString(R.string.firestore_database_id)
                 val firestore = FirebaseFirestore.getInstance(databaseId)
                 val roomDb = RabtaDatabase.getInstance(app)
+                val prefs = SyncPrefsDataStore(app)
+                val firestoreRepo = FirestoreContactsRepository(firestore)
+                val syncEngine = com.example.data.sync.OfflineFirstSyncEngine(
+                    context = app,
+                    roomDb = roomDb,
+                    firestoreRepo = firestoreRepo,
+                    prefs = prefs,
+                )
                 RabtaViewModel(
                     appContext = app,
                     currentUserId = user.uid,
                     currentUserName = user.displayName ?: "User",
                     currentUserEmail = user.email,
                     db = roomDb,
-                    firestoreRepo = FirestoreContactsRepository(firestore),
+                    firestoreRepo = firestoreRepo,
                     callLogReader = CallLogReader(app, roomDb.contactDao()),
                     deviceContactsManager = DeviceContactsManager(app),
-                    prefs = SyncPrefsDataStore(app),
+                    prefs = prefs,
                     gitHubService = GitHubUpdateService(),
+                    syncEngine = syncEngine,
                 )
             }
         },
@@ -268,20 +324,21 @@ private fun AuthenticatedMainScreen(
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDest = backStackEntry?.destination
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     val totalCount by viewModel.totalContactsCount.collectAsStateWithLifecycle()
+    val allContacts by viewModel.allContactsAlphabetical.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
-    val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val globalSearchResult by viewModel.globalSearchResult.collectAsStateWithLifecycle()
     val dialpadMatches by viewModel.dialpadMatches.collectAsStateWithLifecycle()
     val favorites by viewModel.favoriteContacts.collectAsStateWithLifecycle()
-    val frequentCalls by viewModel.frequentCalls.collectAsStateWithLifecycle()
-    val recentCalls by viewModel.recentCalls.collectAsStateWithLifecycle()
+    val appCallLogs by viewModel.appCallLogs.collectAsStateWithLifecycle()
     val hasCallLogPerm by viewModel.hasCallLogPermission.collectAsStateWithLifecycle()
-    val weeklyLogs by viewModel.weeklyActiveWhatsAppLogs.collectAsStateWithLifecycle()
     val recentLogs by viewModel.recentWhatsAppLogs.collectAsStateWithLifecycle()
     val bundledImported by viewModel.bundledImported.collectAsStateWithLifecycle()
     val importProgress by viewModel.importProgressText.collectAsStateWithLifecycle()
-    val cloudSyncStatus by viewModel.cloudSyncStatus.collectAsStateWithLifecycle()
+    val syncEngineState by viewModel.syncEngineState.collectAsStateWithLifecycle()
+    val cacheStats by viewModel.cacheStats.collectAsStateWithLifecycle()
     val currentCatPath by viewModel.currentCategoryPath.collectAsStateWithLifecycle()
     val childCategories by viewModel.childCategories.collectAsStateWithLifecycle()
     val categoryContacts by viewModel.categoryContacts.collectAsStateWithLifecycle()
@@ -308,6 +365,13 @@ private fun AuthenticatedMainScreen(
     val recordingSourceMode by viewModel.recordingSourceMode.collectAsStateWithLifecycle()
     val vibrateOnAnswer by viewModel.vibrateOnAnswer.collectAsStateWithLifecycle()
     val autoSpeakerForRecord by viewModel.autoSpeakerForRecord.collectAsStateWithLifecycle()
+    val appLockEnabled by viewModel.appLockEnabled.collectAsStateWithLifecycle()
+    val appLockPinHash by viewModel.appLockPinHash.collectAsStateWithLifecycle()
+    val biometricLockEnabled by viewModel.biometricLockEnabled.collectAsStateWithLifecycle()
+    val hideLockscreenCallerDetails by viewModel.hideLockscreenCallerDetails.collectAsStateWithLifecycle()
+    val preCallContext by viewModel.preCallContext.collectAsStateWithLifecycle()
+    val duplicateClusters by viewModel.duplicateClusters.collectAsStateWithLifecycle()
+    val activeCallUi by RabtaInCallService.uiState.collectAsStateWithLifecycle()
     val lockedCategories by viewModel.lockedCategories.collectAsStateWithLifecycle()
     val sessionUnlockedCategories by viewModel.sessionUnlockedCategories.collectAsStateWithLifecycle()
     val whatsappTemplates by viewModel.whatsappTemplates.collectAsStateWithLifecycle()
@@ -322,18 +386,29 @@ private fun AuthenticatedMainScreen(
     var showEditor by remember { mutableStateOf(false) }
     var showWaCapture by remember { mutableStateOf(false) }
     var showQrScanner by remember { mutableStateOf(false) }
-    var dialpadExpanded by remember { mutableStateOf(false) }
     var dialpadSeed by remember { mutableStateOf("") }
     var showAiSheet by remember { mutableStateOf(false) }
     var showLiveTranscriber by remember { mutableStateOf(false) }
+    var showDuplicateMerge by remember { mutableStateOf(false) }
+    var activeTranscriptModal by remember { mutableStateOf<CallTranscriptRecord?>(null) }
+    var isAppUnlocked by remember(user.uid, appLockEnabled, appLockPinHash) {
+        mutableStateOf(!appLockEnabled || appLockPinHash.isBlank())
+    }
 
-    fun openIntegratedKeypad(seed: String = "") {
-        dialpadSeed = seed
-        dialpadExpanded = true
-        navController.navigate(RouteHome) {
+    if (appLockEnabled && appLockPinHash.isNotBlank() && !isAppUnlocked) {
+        AppLockScreen(
+            pinHash = appLockPinHash,
+            biometricEnabled = biometricLockEnabled,
+            onUnlocked = { isAppUnlocked = true },
+        )
+        return
+    }
+
+    fun navigateTopTab(route: Any) {
+        navController.navigate(route) {
             launchSingleTop = true
             restoreState = true
-            popUpTo(RouteHome) { saveState = true }
+            popUpTo(RouteKeypad) { saveState = true }
         }
     }
 
@@ -352,11 +427,13 @@ private fun AuthenticatedMainScreen(
         } else if (requestedFollowUpContactId != null || !requestedFollowUpPhone.isNullOrBlank()) {
             viewModel.openContactByPhoneOrId(requestedFollowUpContactId, requestedFollowUpPhone)
             if (!requestedFollowUpPhone.isNullOrBlank()) {
-                openIntegratedKeypad(requestedFollowUpPhone)
+                dialpadSeed = requestedFollowUpPhone
+                navigateTopTab(RouteKeypad)
             }
             onConsumeIncoming()
         } else if (requestedOpenDialpad) {
-            openIntegratedKeypad(requestedDialDigits.orEmpty())
+            dialpadSeed = requestedDialDigits.orEmpty()
+            navigateTopTab(RouteKeypad)
             onConsumeIncoming()
         } else if (requestedOpenAi) {
             showAiSheet = true
@@ -371,14 +448,17 @@ private fun AuthenticatedMainScreen(
         }
     }
 
-    // 3 clean tabs — Keypad is docked smoothly inside Home, and Map opens from inside every contact
     val navItems = listOf(
-        Triple(RouteHome, R.string.nav_home, Icons.Rounded.Home),
-        Triple(RouteCategories, R.string.nav_categories, Icons.Rounded.FolderCopy),
-        Triple(RouteTools, R.string.nav_tools, Icons.Rounded.Sync),
+        Triple(RouteKeypad, R.string.nav_keypad, Icons.Rounded.Dialpad),
+        Triple(RouteRecents, R.string.nav_recents, Icons.Rounded.History),
+        Triple(RouteContacts, R.string.nav_contacts, Icons.Rounded.Contacts),
+        Triple(RouteAiVault, R.string.nav_ai_vault, Icons.Rounded.GraphicEq),
     )
 
-    val isOnHome = currentDest?.hasRoute(RouteHome::class) != false
+    val isOnCategories = currentDest?.hasRoute(RouteCategories::class) == true
+    val isOnSettings = currentDest?.hasRoute(RouteSettings::class) == true
+    val isOnContacts = currentDest?.hasRoute(RouteContacts::class) == true
+    val isPrimaryTab = !isOnCategories && !isOnSettings
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
@@ -387,37 +467,61 @@ private fun AuthenticatedMainScreen(
             snackbarHost = { SnackbarHost(snackbarHostState) },
             topBar = {
                 CenterAlignedTopAppBar(
-                    title = { Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge) },
-                    actions = {
-                        IconButton(
-                            onClick = { showLiveTranscriber = true },
-                            modifier = Modifier.testTag("topbar_live_transcriber_btn"),
-                        ) {
-                            Icon(Icons.Rounded.GraphicEq, contentDescription = "تفريغ صوتي مباشر")
+                    navigationIcon = {
+                        if (!isPrimaryTab) {
+                            IconButton(
+                                onClick = { navController.popBackStack() },
+                                modifier = Modifier.testTag("topbar_back_btn"),
+                            ) {
+                                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "رجوع")
+                            }
+                        } else {
+                            SyncStatusPill(
+                                syncState = syncEngineState,
+                                onClick = viewModel::triggerCloudSyncNow,
+                            )
                         }
+                    },
+                    title = {
+                        Text(
+                            text = when {
+                                isOnCategories -> stringResource(R.string.nav_categories)
+                                isOnSettings -> "الإعدادات والمزامنة"
+                                else -> stringResource(R.string.app_name)
+                            },
+                            style = MaterialTheme.typography.titleLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
+                    actions = {
                         IconButton(
                             onClick = { showAiSheet = true },
                             modifier = Modifier.testTag("topbar_ai_btn"),
                         ) {
                             Icon(Icons.Rounded.AutoAwesome, contentDescription = stringResource(R.string.ai_assistant_title))
                         }
+                        if (!isOnSettings) {
+                            IconButton(
+                                onClick = {
+                                    navController.navigate(RouteSettings) { launchSingleTop = true }
+                                },
+                                modifier = Modifier.testTag("topbar_settings_btn"),
+                            ) {
+                                Icon(Icons.Rounded.Settings, contentDescription = "الإعدادات")
+                            }
+                        }
                     },
                 )
             },
             bottomBar = {
-                if (!useRail) {
+                if (!useRail && isPrimaryTab) {
                     NavigationBar {
                         navItems.forEach { (route, labelRes, icon) ->
                             val selected = currentDest?.hasRoute(route::class) == true
                             NavigationBarItem(
                                 selected = selected,
-                                onClick = {
-                                    navController.navigate(route) {
-                                        launchSingleTop = true
-                                        restoreState = true
-                                        popUpTo(RouteHome) { saveState = true }
-                                    }
-                                },
+                                onClick = { navigateTopTab(route) },
                                 icon = { Icon(icon, contentDescription = stringResource(labelRes)) },
                                 label = {
                                     Text(
@@ -434,11 +538,11 @@ private fun AuthenticatedMainScreen(
                 }
             },
             floatingActionButton = {
-                if (!(isOnHome && dialpadExpanded)) {
+                if (isOnContacts || isOnCategories) {
                     FloatingActionButton(
                         onClick = {
                             editingContact = null
-                            editorCategorySeed = currentCatPath
+                            editorCategorySeed = if (isOnCategories) currentCatPath else ""
                             showEditor = true
                         },
                         modifier = Modifier.testTag("fab_add_contact"),
@@ -453,19 +557,13 @@ private fun AuthenticatedMainScreen(
                     .fillMaxSize()
                     .padding(innerPadding),
             ) {
-                if (useRail) {
+                if (useRail && isPrimaryTab) {
                     NavigationRail {
                         navItems.forEach { (route, labelRes, icon) ->
                             val selected = currentDest?.hasRoute(route::class) == true
                             NavigationRailItem(
                                 selected = selected,
-                                onClick = {
-                                    navController.navigate(route) {
-                                        launchSingleTop = true
-                                        restoreState = true
-                                        popUpTo(RouteHome) { saveState = true }
-                                    }
-                                },
+                                onClick = { navigateTopTab(route) },
                                 icon = { Icon(icon, contentDescription = stringResource(labelRes)) },
                                 label = { Text(stringResource(labelRes), maxLines = 1) },
                             )
@@ -474,74 +572,156 @@ private fun AuthenticatedMainScreen(
                 }
 
                 Box(modifier = Modifier.weight(1f).fillMaxSize()) {
-                    NavHost(
-                        navController = navController,
-                        startDestination = RouteHome,
-                    ) {
-                        composable<RouteHome> {
-                            HomeScreen(
-                                totalCount = totalCount,
-                                searchQuery = searchQuery,
-                                searchResults = searchResults,
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        if (activeCallUi.hasActiveCall && activeCallUi.callState != Call.STATE_DISCONNECTED) {
+                            FloatingActiveCallBar(
+                                callUi = activeCallUi,
+                                hideLockscreenDetails = hideLockscreenCallerDetails,
+                                onReturnToCall = {
+                                    val callIntent = Intent(context, InCallActivity::class.java).apply {
+                                        addFlags(
+                                            Intent.FLAG_ACTIVITY_NEW_TASK or
+                                                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                                                Intent.FLAG_ACTIVITY_SINGLE_TOP
+                                        )
+                                    }
+                                    runCatching { context.startActivity(callIntent) }
+                                },
+                                onEndCall = { RabtaInCallService.endCall() },
+                            )
+                        }
+
+                        NavHost(
+                            navController = navController,
+                            startDestination = RouteKeypad,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                        composable<RouteKeypad> {
+                            KeypadScreen(
+                                initialDigits = dialpadSeed,
+                                matches = dialpadMatches,
                                 favorites = favorites,
-                                frequentCalls = frequentCalls,
-                                recentCalls = recentCalls,
-                                hasCallLogPermission = hasCallLogPerm,
-                                weeklyLogs = weeklyLogs,
-                                bundledImported = bundledImported,
-                                importProgressText = importProgress,
-                                cloudSyncStatus = cloudSyncStatus,
-                                showContactPhotos = showContactPhotos,
-                                preferredSimSlot = preferredSimSlot,
-                                strictPhonebookIsolation = strictIsolation,
-                                recentTranscripts = callTranscripts,
-                                dialpadExpanded = dialpadExpanded,
-                                dialpadSeed = dialpadSeed,
-                                dialpadMatches = dialpadMatches,
                                 dialHistory = dialHistory,
                                 recentlyDeletedHistory = recentlyDeletedDial,
                                 paymentTemplates = paymentTemplates,
-                                postCallSummary = postCallSummary,
-                                whatsappTemplates = whatsappTemplates,
-                                onSetDialpadExpanded = { expanded -> dialpadExpanded = expanded },
-                                onDialpadQueryChange = viewModel::searchForDialpad,
+                                showContactPhotos = showContactPhotos,
+                                preferredSimSlot = preferredSimSlot,
+                                preCallContext = preCallContext,
+                                onLookupPreCallContext = viewModel::loadPreCallContext,
+                                onQueryChange = viewModel::searchForDialpad,
                                 onRecordDial = viewModel::recordDialHistoryDraft,
-                                onSoftDeleteDialHistory = viewModel::softDeleteDialHistory,
-                                onRestoreDialHistory = viewModel::restoreDialHistory,
-                                onEmptyDialTrash = viewModel::emptyDialTrash,
-                                onSaveDialNumber = { num ->
+                                onSoftDeleteHistory = viewModel::softDeleteDialHistory,
+                                onRestoreHistory = viewModel::restoreDialHistory,
+                                onEmptyTrash = viewModel::emptyDialTrash,
+                                onOpenContact = viewModel::openContact,
+                                onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
+                                onSaveNewNumber = { num ->
                                     editingContact = ContactRecord(primaryPhone = num, phones = listOf(num))
                                     editorCategorySeed = ""
                                     showEditor = true
                                 },
-                                onSearchQueryChange = viewModel::updateSearchQuery,
+                            )
+                        }
+
+                        composable<RouteRecents> {
+                            RecentsScreen(
+                                callLogs = appCallLogs,
+                                callTranscripts = callTranscripts,
+                                hasCallLogPermission = hasCallLogPerm,
+                                showContactPhotos = showContactPhotos,
+                                preferredSimSlot = preferredSimSlot,
+                                postCallSummary = postCallSummary,
+                                whatsappTemplates = whatsappTemplates,
+                                onRecordDial = viewModel::recordDialHistoryDraft,
                                 onOpenContact = viewModel::openContact,
+                                onSaveNumber = { num ->
+                                    editingContact = ContactRecord(primaryPhone = num, phones = listOf(num))
+                                    editorCategorySeed = ""
+                                    showEditor = true
+                                },
+                                onOpenTranscript = { tr -> activeTranscriptModal = tr },
+                                onDeleteCallLog = { entry ->
+                                    viewModel.softDeleteCallLog(entry.id)
+                                    scope.launch {
+                                        val res = snackbarHostState.showSnackbar(
+                                            message = "تم حذف المكالمة من السجل",
+                                            actionLabel = "تراجع",
+                                            duration = SnackbarDuration.Short,
+                                        )
+                                        if (res == SnackbarResult.ActionPerformed) {
+                                            viewModel.restoreCallLog(entry.id)
+                                        }
+                                    }
+                                },
                                 onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
                                 onWhatsAppQuick = viewModel::launchWhatsAppQuick,
                                 onScheduleFollowUpQuick = { name, phone, cid, mins ->
                                     viewModel.scheduleFollowUpReminder(name, phone, cid, mins)
                                 },
                                 onDismissPostCallSummary = viewModel::dismissPostCallSummary,
-                                onAddContact = {
-                                    editingContact = null
-                                    editorCategorySeed = ""
-                                    showEditor = true
-                                },
-                                onCaptureWhatsApp = { showWaCapture = true },
+                                onOpenLiveTranscriber = { showLiveTranscriber = true },
+                                onRefreshCallLogs = viewModel::refreshCallLogs,
+                                onPermissionsChanged = viewModel::refreshPermissionsState,
+                            )
+                        }
+
+                        composable<RouteContacts> {
+                            ContactsScreen(
+                                allContacts = allContacts,
+                                favorites = favorites,
+                                totalCount = totalCount,
+                                bundledImported = bundledImported,
+                                importProgressText = importProgress,
+                                searchQuery = searchQuery,
+                                globalSearchResult = globalSearchResult,
+                                showContactPhotos = showContactPhotos,
+                                preferredSimSlot = preferredSimSlot,
+                                onSearchQueryChange = viewModel::updateSearchQuery,
+                                onRecordDial = viewModel::recordDialHistoryDraft,
+                                onOpenContact = viewModel::openContact,
+                                onOpenTranscript = { tr -> activeTranscriptModal = tr },
+                                onWhatsApp = { c, p -> viewModel.launchWhatsAppAndLog(c, p) },
                                 onOpenCategories = {
                                     navController.navigate(RouteCategories) { launchSingleTop = true }
                                 },
                                 onOpenQrScanner = { showQrScanner = true },
-                                onOpenLiveTranscriber = { showLiveTranscriber = true },
-                                onOpenAiAssistant = { showAiSheet = true },
+                                onOpenDuplicates = {
+                                    viewModel.scanDuplicateClusters()
+                                    showDuplicateMerge = true
+                                },
                                 onImportBundledCsv = { viewModel.importBundledDatasets(uploadToCloud = true) },
-                                onSyncWeeklyWhatsApp = viewModel::syncWeeklyActiveWhatsAppToPhonebook,
-                                onSaveCallNotes = { viewModel.saveTranscriptNotesToContact(it, silent = false) },
-                                onMarkCalendarAdded = viewModel::markCalendarEventAdded,
-                                onPermissionsChanged = viewModel::refreshPermissionsState,
                             )
                         }
+
+                        composable<RouteAiVault> {
+                            AiVaultScreen(
+                                transcripts = callTranscripts,
+                                rawRecordings = callRecordings,
+                                cacheStats = cacheStats,
+                                onToggleActionItem = viewModel::toggleTranscriptActionItem,
+                                onSaveCallNotes = { viewModel.saveTranscriptNotesToContact(it, silent = false) },
+                                onMarkCalendarAdded = viewModel::markCalendarEventAdded,
+                                onAnalyzeTranscript = viewModel::analyzeCallTranscript,
+                                onDeleteTranscript = viewModel::softDeleteTranscript,
+                                onTranscribeRawRecording = viewModel::transcribeRecordingItem,
+                                onDeleteRawRecording = viewModel::deleteRecording,
+                                onRefreshVault = {
+                                    viewModel.refreshRecordings()
+                                    viewModel.refreshCacheStats()
+                                },
+                                onOpenLiveTranscriber = { showLiveTranscriber = true },
+                                onOpenAiAssistant = { showAiSheet = true },
+                            )
+                        }
+
                         composable<RouteCategories> {
+                            BackHandler {
+                                if (currentCatPath.isNotBlank()) {
+                                    viewModel.navigateCategoryUp()
+                                } else {
+                                    navController.popBackStack()
+                                }
+                            }
                             CategoriesScreen(
                                 currentPath = currentCatPath,
                                 childCategories = childCategories,
@@ -574,7 +754,9 @@ private fun AuthenticatedMainScreen(
                                 onUnlockCategorySession = viewModel::markCategoryUnlockedForSession,
                             )
                         }
-                        composable<RouteTools> {
+
+                        composable<RouteSettings> {
+                            BackHandler { navController.popBackStack() }
                             ToolsSyncScreen(
                                 userEmail = user.email,
                                 totalContacts = totalCount,
@@ -598,6 +780,11 @@ private fun AuthenticatedMainScreen(
                                 vibrateOnAnswer = vibrateOnAnswer,
                                 autoSpeakerForRecord = autoSpeakerForRecord,
                                 whatsappTemplates = whatsappTemplates,
+                                appLockEnabled = appLockEnabled,
+                                hasAppLockPin = appLockPinHash.isNotBlank(),
+                                biometricLockEnabled = biometricLockEnabled,
+                                hideLockscreenCallerDetails = hideLockscreenCallerDetails,
+                                duplicateClustersCount = duplicateClusters.size,
                                 onSetThemeMode = viewModel::setThemeMode,
                                 onSetCalmPalette = viewModel::setCalmPalette,
                                 onSetAutoRecordCalls = viewModel::setAutoRecordCalls,
@@ -609,6 +796,11 @@ private fun AuthenticatedMainScreen(
                                 onSetRecordingSourceMode = viewModel::setRecordingSourceMode,
                                 onSetVibrateOnAnswer = viewModel::setVibrateOnAnswer,
                                 onSetAutoSpeakerForRecord = viewModel::setAutoSpeakerForRecord,
+                                onSetAppLockPin = viewModel::setAppLockPin,
+                                onToggleAppLockEnabled = viewModel::setAppLockEnabled,
+                                onSetBiometricLockEnabled = viewModel::setBiometricLockEnabled,
+                                onSetHideLockscreenCallerDetails = viewModel::setHideLockscreenCallerDetails,
+                                onLockAppNow = { isAppUnlocked = false },
                                 onAddWhatsAppTemplate = viewModel::addWhatsAppTemplate,
                                 onRemoveWhatsAppTemplate = viewModel::removeWhatsAppTemplate,
                                 onRefreshRecordings = viewModel::refreshRecordings,
@@ -622,6 +814,11 @@ private fun AuthenticatedMainScreen(
                                 onImportExternalFile = { uri, name -> viewModel.importFromUri(uri, name, true) },
                                 onPullFromCloud = viewModel::pullAllFromCloud,
                                 onShareExport = viewModel::shareBulkOrCategory,
+                                onExportJson = viewModel::exportAllContactsAsJson,
+                                onOpenDuplicateMerge = {
+                                    viewModel.scanDuplicateClusters()
+                                    showDuplicateMerge = true
+                                },
                                 onOpenQrScanner = { showQrScanner = true },
                                 onSyncWeeklyWhatsApp = viewModel::syncWeeklyActiveWhatsAppToPhonebook,
                                 onRemoveFromPhonebook = viewModel::toggleDeviceContactSync,
@@ -636,6 +833,7 @@ private fun AuthenticatedMainScreen(
                                     viewModel.runAiBilingualEnrichBatch()
                                 },
                             )
+                        }
                         }
                     }
                 }
@@ -656,15 +854,25 @@ private fun AuthenticatedMainScreen(
                     (PhoneUtils.phoneSearchKey(tr.phone).let { it.length >= 6 && contactPhoneKeys.contains(it) })
             }
         }
+        val contactCallLogs = remember(appCallLogs, contact) {
+            appCallLogs.filter { entry ->
+                entry.matchedContact?.id == contact.id ||
+                    (PhoneUtils.phoneSearchKey(entry.number).let { it.length >= 6 && contactPhoneKeys.contains(it) })
+            }
+        }
         ContactDetailBottomSheet(
             contact = contact,
             paymentTemplates = paymentTemplates,
             contactTranscripts = contactTranscripts,
+            contactCallLogs = contactCallLogs,
+            preCallContext = preCallContext,
             showPhoto = showContactPhotos,
             preferredSimSlot = preferredSimSlot,
             whatsappTemplates = whatsappTemplates,
             onDismiss = viewModel::closeContact,
             onToggleFavorite = viewModel::toggleFavorite,
+            onToggleBlocked = viewModel::toggleBlocked,
+            onToggleMuted = viewModel::toggleMuted,
             onEdit = { toEdit ->
                 editingContact = toEdit
                 editorCategorySeed = toEdit.categoryPaths.firstOrNull().orEmpty()
@@ -686,8 +894,39 @@ private fun AuthenticatedMainScreen(
             onSearchByTag = { tag ->
                 viewModel.closeContact()
                 viewModel.updateSearchQuery(tag)
-                navController.navigate(RouteHome) { launchSingleTop = true }
+                navigateTopTab(RouteContacts)
             },
+            onOpenTranscript = { tr ->
+                viewModel.closeContact()
+                activeTranscriptModal = tr
+            },
+        )
+    }
+
+    if (showDuplicateMerge) {
+        DuplicateMergeDialog(
+            clusters = duplicateClusters,
+            onMergeCluster = viewModel::mergeDuplicateCluster,
+            onMergeAll = {
+                viewModel.mergeAllDuplicateClusters()
+                showDuplicateMerge = false
+            },
+            onDismiss = { showDuplicateMerge = false },
+        )
+    }
+
+    activeTranscriptModal?.let { initialRecord ->
+        val liveRecord = remember(callTranscripts, initialRecord) {
+            callTranscripts.firstOrNull { it.id == initialRecord.id } ?: initialRecord
+        }
+        TranscriptQuickDialog(
+            record = liveRecord,
+            onDismiss = { activeTranscriptModal = null },
+            onToggleActionItem = viewModel::toggleTranscriptActionItem,
+            onSaveNotes = { viewModel.saveTranscriptNotesToContact(it, silent = false) },
+            onMarkCalendarAdded = viewModel::markCalendarEventAdded,
+            onAnalyze = viewModel::analyzeCallTranscript,
+            onDelete = viewModel::softDeleteTranscript,
         )
     }
 
@@ -825,3 +1064,158 @@ private fun AuthenticatedMainScreen(
         )
     }
 }
+
+@Composable
+private fun SyncStatusPill(
+    syncState: SyncEngineState,
+    onClick: () -> Unit,
+) {
+    val (label, icon, containerColor, contentColor) = when (syncState.status) {
+        SyncStatusBadge.OFFLINE -> Quad(
+            if (syncState.pendingCount > 0) "أوفلاين (${syncState.pendingCount})" else "أوفلاين",
+            Icons.Rounded.CloudOff,
+            MaterialTheme.colorScheme.surfaceContainerHigh,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SyncStatusBadge.SYNCING -> Quad(
+            "مزامنة...",
+            Icons.Rounded.CloudSync,
+            MaterialTheme.colorScheme.primaryContainer,
+            MaterialTheme.colorScheme.onPrimaryContainer,
+        )
+        SyncStatusBadge.SYNCED -> Quad(
+            "متزامن",
+            Icons.Rounded.CloudDone,
+            MaterialTheme.colorScheme.secondaryContainer,
+            MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+        SyncStatusBadge.ERROR -> Quad(
+            "إعادة المزامنة",
+            Icons.Rounded.ErrorOutline,
+            MaterialTheme.colorScheme.errorContainer,
+            MaterialTheme.colorScheme.onErrorContainer,
+        )
+        SyncStatusBadge.IDLE -> Quad(
+            if (syncState.pendingCount > 0) "معلق (${syncState.pendingCount})" else "محلي آمن",
+            Icons.Rounded.CloudDone,
+            MaterialTheme.colorScheme.surfaceContainerLow,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    Surface(
+        shape = RoundedCornerShape(99.dp),
+        color = containerColor,
+        modifier = Modifier
+            .padding(start = 8.dp)
+            .clip(RoundedCornerShape(99.dp))
+            .clickable(onClick = onClick)
+            .testTag("topbar_sync_pill"),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = "حالة المزامنة",
+                tint = contentColor,
+                modifier = Modifier.size(16.dp),
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = contentColor,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FloatingActiveCallBar(
+    callUi: ActiveCallUiState,
+    hideLockscreenDetails: Boolean,
+    onReturnToCall: () -> Unit,
+    onEndCall: () -> Unit,
+) {
+    val context = LocalContext.current
+    val keyguardLocked = remember(context) {
+        (context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
+    }
+    val maskDetails = keyguardLocked && (hideLockscreenDetails || callUi.hideLockscreenDetails)
+    val callerLabel = if (maskDetails) {
+        "مكالمة جارية (خاص)"
+    } else {
+        callUi.matchedContact?.displayName?.ifBlank { callUi.phoneNumber } ?: callUi.phoneNumber.ifBlank { "مكالمة نشطة" }
+    }
+    val stateLabel = when (callUi.callState) {
+        Call.STATE_RINGING -> "يرن الآن"
+        Call.STATE_DIALING, Call.STATE_CONNECTING -> "جاري الاتصال"
+        Call.STATE_HOLDING -> "قيد الانتظار"
+        else -> AppLockSecurity.formatDurationClock(callUi.elapsedSec)
+    }
+
+    Surface(
+        color = WhatsAppGreen.copy(alpha = 0.16f),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onReturnToCall)
+            .testTag("floating_active_call_bar"),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(if (callUi.isRecording) ErrorRed else WhatsAppGreen),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Call,
+                    contentDescription = "العودة للمكالمة",
+                    tint = MaterialTheme.colorScheme.onPrimary,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = callerLabel,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = if (callUi.isRecording) "$stateLabel • جاري التسجيل" else "$stateLabel • اضغط للعودة لشاشة المكالمة",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (callUi.isRecording) ErrorRed else WhatsAppGreen,
+                    maxLines = 1,
+                )
+            }
+            IconButton(
+                onClick = onEndCall,
+                colors = IconButtonDefaults.iconButtonColors(
+                    containerColor = ErrorRed,
+                    contentColor = MaterialTheme.colorScheme.onError,
+                ),
+                modifier = Modifier
+                    .size(40.dp)
+                    .testTag("floating_call_end_btn"),
+            ) {
+                Icon(Icons.Rounded.CallEnd, contentDescription = "إنهاء المكالمة", modifier = Modifier.size(18.dp))
+            }
+        }
+    }
+}
+
+private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)

@@ -50,6 +50,11 @@ data class ContactRecord(
     val photoUri: String? = null,
     val syncedToDevice: Boolean = false,
     val isFavorite: Boolean = false,
+    val avatarColorSeed: Int = 0,
+    val muted: Boolean = false,
+    val blocked: Boolean = false,
+    val lastContactedEpochMs: Long = 0L,
+    val clientUpdatedAtMs: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
@@ -72,8 +77,14 @@ data class ContactRecord(
         }
         telegramHandle?.takeIf { it.isNotBlank() }?.let { put("telegramHandle", it.take(100)) }
         website?.takeIf { it.isNotBlank() }?.let { put("website", it.take(400)) }
-        put("syncedToDevice", syncedToDevice)
+        // Sandbox isolation: contacts inside this app NEVER sync to the device's system phonebook
+        put("syncedToDevice", false)
         put("isFavorite", isFavorite)
+        put("avatarColorSeed", avatarColorSeed.coerceIn(0, 1000))
+        put("muted", muted)
+        put("blocked", blocked)
+        put("lastContactedEpochMs", lastContactedEpochMs.coerceAtLeast(0L))
+        put("clientUpdatedAtMs", clientUpdatedAtMs.coerceAtLeast(0L))
         if (isCreate) {
             put("createdAt", FieldValue.serverTimestamp())
         } else if (createdAt != null) {
@@ -164,8 +175,12 @@ data class CallLogEntry(
     val callType: Int,
     val timestampMs: Long,
     val durationSec: Long,
-    val callCount: Int,
+    val callCount: Int = 1,
     val matchedContact: ContactRecord? = null,
+    val simSlot: Int? = null,
+    val transcriptId: String? = null,
+    val hasRecording: Boolean = false,
+    val notes: String? = null,
 )
 
 data class CallTranscriptRecord(
@@ -178,6 +193,10 @@ data class CallTranscriptRecord(
     val durationSec: Long = 0L,
     val transcript: String = "",
     val highlights: List<String> = emptyList(),
+    val summaryBullets: List<String> = emptyList(),
+    val oneLineSummary: String = "",
+    val segments: List<TranscriptSegment> = emptyList(),
+    val actionItems: List<CallActionItem> = emptyList(),
     val extractedNotes: String = "",
     val suggestedEventTitle: String = "",
     val suggestedEventDateIso: String = "",
@@ -186,6 +205,11 @@ data class CallTranscriptRecord(
     val eventAddedToCalendar: Boolean = false,
     val notesSavedToContact: Boolean = false,
     val status: String = "PENDING",
+    val audioFileName: String = "",
+    val audioSizeBytes: Long = 0L,
+    val audioCachedLocally: Boolean = false,
+    val updatedAtEpochMs: Long = 0L,
+    val syncState: String = "PENDING",
 )
 
 data class DialHistoryEntry(

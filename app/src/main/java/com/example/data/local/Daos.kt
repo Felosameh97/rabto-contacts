@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.domain.model.SyncState
 import com.example.util.PhoneUtils
 import kotlinx.coroutines.flow.Flow
 
@@ -22,33 +23,45 @@ data class PhoneLookupMatch(
 @Dao
 interface ContactDao {
 
-    @Query("SELECT COUNT(*) FROM contacts")
+    @Query("SELECT COUNT(*) FROM contacts WHERE isDeleted = 0")
     fun observeTotalCount(): Flow<Int>
 
-    @Query("SELECT COUNT(*) FROM contacts")
+    @Query("SELECT COUNT(*) FROM contacts WHERE isDeleted = 0")
     suspend fun getTotalCount(): Int
 
-    @Query("SELECT * FROM contacts WHERE isFavorite = 1 ORDER BY displayName ASC LIMIT 40")
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 ORDER BY displayName COLLATE NOCASE ASC")
+    fun observeAllAlphabetical(): Flow<List<ContactEntity>>
+
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND isFavorite = 1 ORDER BY displayName COLLATE NOCASE ASC LIMIT 60")
     fun observeFavorites(): Flow<List<ContactEntity>>
 
-    @Query("SELECT * FROM contacts WHERE isFavorite = 1 ORDER BY displayName ASC LIMIT :limit")
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND isFavorite = 1 ORDER BY displayName COLLATE NOCASE ASC LIMIT :limit")
     suspend fun getFavoritesOnce(limit: Int = 8): List<ContactEntity>
 
-    @Query("SELECT * FROM contacts ORDER BY updatedAtEpochMs DESC LIMIT :limit OFFSET :offset")
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND isBlocked = 1 ORDER BY displayName COLLATE NOCASE ASC")
+    fun observeBlockedContacts(): Flow<List<ContactEntity>>
+
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 ORDER BY updatedAtEpochMs DESC LIMIT :limit OFFSET :offset")
     suspend fun getRecentOrAllPage(limit: Int = 200, offset: Int = 0): List<ContactEntity>
 
-    @Query("SELECT * FROM contacts WHERE id = :id LIMIT 1")
+    @Query("SELECT * FROM contacts WHERE id = :id AND isDeleted = 0 LIMIT 1")
     suspend fun getById(id: String): ContactEntity?
 
-    @Query("SELECT * FROM contacts WHERE id IN (:ids)")
+    @Query("SELECT * FROM contacts WHERE id = :id LIMIT 1")
+    suspend fun getByIdEvenIfDeleted(id: String): ContactEntity?
+
+    @Query("SELECT * FROM contacts WHERE id IN (:ids) AND isDeleted = 0")
     suspend fun getByIds(ids: List<String>): List<ContactEntity>
+
+    @Query("SELECT id FROM contacts WHERE isDeleted = 0")
+    suspend fun getAllActiveIds(): List<String>
 
     @Query(
         """
         SELECT * FROM contacts
-        WHERE searchBlob LIKE '%' || :query || '%'
-           OR primaryPhone LIKE '%' || :query || '%'
-        ORDER BY isFavorite DESC, displayName ASC
+        WHERE isDeleted = 0
+          AND (searchBlob LIKE '%' || :query || '%' OR primaryPhone LIKE '%' || :query || '%')
+        ORDER BY isFavorite DESC, displayName COLLATE NOCASE ASC
         LIMIT :limit OFFSET :offset
         """
     )
@@ -58,33 +71,45 @@ interface ContactDao {
         """
         SELECT c.* FROM contacts c
         INNER JOIN contact_categories cc ON c.id = cc.contactId
-        WHERE cc.categoryPath = :categoryPath
-        ORDER BY c.isFavorite DESC, c.displayName ASC
+        WHERE c.isDeleted = 0 AND cc.categoryPath = :categoryPath
+        ORDER BY c.isFavorite DESC, c.displayName COLLATE NOCASE ASC
         LIMIT :limit OFFSET :offset
         """
     )
     suspend fun getByCategoryPath(categoryPath: String, limit: Int = 120, offset: Int = 0): List<ContactEntity>
 
-    @Query("SELECT categoryPath, COUNT(*) AS cnt FROM contact_categories WHERE categoryPath IN (:paths) GROUP BY categoryPath")
+    @Query(
+        """
+        SELECT cc.categoryPath, COUNT(*) AS cnt
+        FROM contact_categories cc
+        INNER JOIN contacts c ON cc.contactId = c.id
+        WHERE c.isDeleted = 0 AND cc.categoryPath IN (:paths)
+        GROUP BY cc.categoryPath
+        """
+    )
     suspend fun countForCategoryPaths(paths: List<String>): List<CategoryCountTuple>
 
-    @Query("SELECT * FROM contacts WHERE latitude IS NOT NULL AND longitude IS NOT NULL ORDER BY updatedAtEpochMs DESC LIMIT 2000")
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND latitude IS NOT NULL AND longitude IS NOT NULL ORDER BY updatedAtEpochMs DESC LIMIT 2000")
     fun observeGeoContacts(): Flow<List<ContactEntity>>
 
-    @Query("SELECT * FROM contacts WHERE syncedToDevice = 1 ORDER BY displayName ASC")
+    // Sandbox isolation invariant: always returns empty so no contacts are ever marked for device phonebook export
+    @Query("SELECT * FROM contacts WHERE 0 = 1")
     fun observeSyncedContacts(): Flow<List<ContactEntity>>
 
-    @Query("SELECT c.* FROM phone_lookup p INNER JOIN contacts c ON p.contactId = c.id WHERE p.phoneKey = :phoneKey LIMIT 1")
+    @Query("SELECT c.* FROM phone_lookup p INNER JOIN contacts c ON p.contactId = c.id WHERE p.phoneKey = :phoneKey AND c.isDeleted = 0 LIMIT 1")
     suspend fun findByExactPhoneKey(phoneKey: String): ContactEntity?
 
-    @Query("SELECT p.phoneKey, c.* FROM phone_lookup p INNER JOIN contacts c ON p.contactId = c.id WHERE p.phoneKey IN (:phoneKeys)")
+    @Query("SELECT p.phoneKey, c.* FROM phone_lookup p INNER JOIN contacts c ON p.contactId = c.id WHERE p.phoneKey IN (:phoneKeys) AND c.isDeleted = 0")
     suspend fun findAllByPhoneKeys(phoneKeys: List<String>): List<PhoneLookupMatch>
 
-    @Query("SELECT * FROM contacts WHERE categoryPathsFlat LIKE '%جهات اتصال تلقائية%' OR categoryPathsFlat = '' LIMIT :limit")
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND (categoryPathsFlat LIKE '%جهات اتصال تلقائية%' OR categoryPathsFlat = '') LIMIT :limit")
     suspend fun getAutoOrUnclassifiedContacts(limit: Int = 120): List<ContactEntity>
 
-    @Query("SELECT * FROM contacts WHERE nickname IS NULL OR nickname = '' OR tagsJoined = '' LIMIT :limit")
+    @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND (nickname IS NULL OR nickname = '' OR tagsJoined = '') LIMIT :limit")
     suspend fun getContactsNeedingBilingualOrTags(limit: Int = 50): List<ContactEntity>
+
+    @Query("SELECT * FROM contacts WHERE syncState != 'SYNCED' ORDER BY updatedAtEpochMs ASC LIMIT :limit")
+    suspend fun getPendingSyncContacts(limit: Int = 200): List<ContactEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<ContactEntity>)
@@ -122,11 +147,29 @@ interface ContactDao {
     @Query("DELETE FROM contacts WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<String>)
 
-    @Query("UPDATE contacts SET syncedToDevice = :synced WHERE id = :id")
+    @Query("UPDATE contacts SET syncedToDevice = (:synced AND 0) WHERE id = :id")
     suspend fun updateSyncedFlag(id: String, synced: Boolean)
 
-    @Query("UPDATE contacts SET isFavorite = :favorite WHERE id = :id")
-    suspend fun updateFavoriteFlag(id: String, favorite: Boolean)
+    @Query("UPDATE contacts SET isFavorite = :favorite, updatedAtEpochMs = :updatedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun updateFavoriteFlag(id: String, favorite: Boolean, updatedAtMs: Long = System.currentTimeMillis(), syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE contacts SET isBlocked = :blocked, updatedAtEpochMs = :updatedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun updateBlockedFlag(id: String, blocked: Boolean, updatedAtMs: Long = System.currentTimeMillis(), syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE contacts SET isMuted = :muted, updatedAtEpochMs = :updatedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun updateMutedFlag(id: String, muted: Boolean, updatedAtMs: Long = System.currentTimeMillis(), syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE contacts SET lastContactedEpochMs = :epochMs, updatedAtEpochMs = :epochMs, syncState = :syncState WHERE id = :id")
+    suspend fun updateLastContacted(id: String, epochMs: Long, syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE contacts SET isDeleted = 1, deletedAtEpochMs = :deletedAtMs, updatedAtEpochMs = :deletedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun softDeleteById(id: String, deletedAtMs: Long, syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE contacts SET isDeleted = 1, deletedAtEpochMs = :deletedAtMs, updatedAtEpochMs = :deletedAtMs, syncState = :syncState WHERE id IN (:ids)")
+    suspend fun softDeleteByIds(ids: List<String>, deletedAtMs: Long, syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE contacts SET syncState = :syncState WHERE id IN (:ids)")
+    suspend fun markSyncState(ids: List<String>, syncState: String)
 
     @Query("DELETE FROM contacts")
     suspend fun clearAll()
@@ -147,6 +190,7 @@ interface ContactDao {
         val phoneRefs = ArrayList<PhoneLookupEntity>(contacts.size)
 
         for (c in contacts) {
+            if (c.isDeleted) continue
             val cats = c.categoryPathsFlat.split("\u001F").filter { it.isNotBlank() }
             for (fullPath in cats) {
                 val parts = fullPath.split(">").map { it.trim() }.filter { it.isNotBlank() }
@@ -178,6 +222,7 @@ interface ContactDao {
         upsert(contact)
         deleteCategoryRefsForContact(contact.id)
         deletePhoneKeysForContact(contact.id)
+        if (contact.isDeleted) return
 
         val catRefs = ArrayList<ContactCategoryCrossRef>()
         val cats = contact.categoryPathsFlat.split("\u001F").filter { it.isNotBlank() }
@@ -208,6 +253,13 @@ interface ContactDao {
     }
 
     @Transaction
+    suspend fun softDeleteContactWithIndexes(contactId: String, deletedAtMs: Long) {
+        deleteCategoryRefsForContact(contactId)
+        deletePhoneKeysForContact(contactId)
+        softDeleteById(contactId, deletedAtMs)
+    }
+
+    @Transaction
     suspend fun deleteContactsWithIndexes(contactIds: List<String>) {
         if (contactIds.isEmpty()) return
         contactIds.chunked(500).forEach { chunk ->
@@ -228,6 +280,9 @@ interface CategoryDao {
 
     @Query("SELECT * FROM categories ORDER BY depth ASC, fullPath ASC")
     suspend fun getAll(): List<CategoryEntity>
+
+    @Query("SELECT * FROM categories WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): CategoryEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(items: List<CategoryEntity>)
@@ -253,13 +308,16 @@ interface WhatsAppLogDao {
     @Query("SELECT * FROM whatsapp_logs WHERE loggedAtEpochMs >= :sinceMs ORDER BY loggedAtEpochMs DESC")
     suspend fun getLogsSince(sinceMs: Long): List<WhatsAppLogEntity>
 
+    @Query("SELECT * FROM whatsapp_logs WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): WhatsAppLogEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(log: WhatsAppLogEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(logs: List<WhatsAppLogEntity>)
 
-    @Query("UPDATE whatsapp_logs SET syncedToPhone = 1 WHERE contactId = :contactId")
+    @Query("UPDATE whatsapp_logs SET syncedToPhone = 0 WHERE contactId = :contactId")
     suspend fun markSyncedByContact(contactId: String)
 }
 
@@ -267,6 +325,9 @@ interface WhatsAppLogDao {
 interface PaymentTemplateDao {
     @Query("SELECT * FROM payment_templates ORDER BY isDefault DESC, name ASC")
     fun observeAll(): Flow<List<PaymentTemplateEntity>>
+
+    @Query("SELECT * FROM payment_templates WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): PaymentTemplateEntity?
 
     @Query("SELECT COUNT(*) FROM payment_templates")
     suspend fun count(): Int
@@ -282,27 +343,159 @@ interface PaymentTemplateDao {
 }
 
 @Dao
+interface AppCallLogDao {
+    @Query("SELECT * FROM app_call_logs WHERE isDeleted = 0 ORDER BY timestampMs DESC LIMIT :limit")
+    fun observeRecentCalls(limit: Int = 350): Flow<List<AppCallLogEntity>>
+
+    @Query("SELECT * FROM app_call_logs WHERE isDeleted = 0 ORDER BY timestampMs DESC LIMIT :limit")
+    suspend fun getRecentCallsOnce(limit: Int = 350): List<AppCallLogEntity>
+
+    @Query(
+        """
+        SELECT * FROM app_call_logs
+        WHERE isDeleted = 0
+          AND ((:contactId IS NOT NULL AND contactId = :contactId) OR (:phoneKey != '' AND phoneKey = :phoneKey))
+        ORDER BY timestampMs DESC
+        LIMIT :limit
+        """
+    )
+    fun observeForContactOrPhone(contactId: String?, phoneKey: String, limit: Int = 100): Flow<List<AppCallLogEntity>>
+
+    @Query(
+        """
+        SELECT * FROM app_call_logs
+        WHERE isDeleted = 0
+          AND ((:contactId IS NOT NULL AND contactId = :contactId) OR (:phoneKey != '' AND phoneKey = :phoneKey))
+        ORDER BY timestampMs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun getForContactOrPhoneOnce(contactId: String?, phoneKey: String, limit: Int = 100): List<AppCallLogEntity>
+
+    @Query(
+        """
+        SELECT * FROM app_call_logs
+        WHERE isDeleted = 0
+          AND (phoneNumber LIKE '%' || :query || '%' OR cachedName LIKE '%' || :query || '%' OR notes LIKE '%' || :query || '%')
+        ORDER BY timestampMs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun searchCallLogs(query: String, limit: Int = 50): List<AppCallLogEntity>
+
+    @Query("SELECT * FROM app_call_logs WHERE id = :id AND isDeleted = 0 LIMIT 1")
+    suspend fun getById(id: String): AppCallLogEntity?
+
+    @Query("SELECT * FROM app_call_logs WHERE id = :id LIMIT 1")
+    suspend fun getByIdEvenIfDeleted(id: String): AppCallLogEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(item: AppCallLogEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(items: List<AppCallLogEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertIgnore(items: List<AppCallLogEntity>)
+
+    @Query("UPDATE app_call_logs SET isDeleted = 1, deletedAtEpochMs = :deletedAtMs, updatedAtEpochMs = :deletedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun softDelete(id: String, deletedAtMs: Long, syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE app_call_logs SET isDeleted = 0, deletedAtEpochMs = NULL, updatedAtEpochMs = :nowMs, syncState = :syncState WHERE id = :id")
+    suspend fun restore(id: String, nowMs: Long, syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE app_call_logs SET syncState = :syncState WHERE id = :id")
+    suspend fun markSyncState(id: String, syncState: String)
+
+    @Query("DELETE FROM app_call_logs WHERE id = :id")
+    suspend fun deleteForever(id: String)
+}
+
+@Dao
 interface CallTranscriptDao {
-    @Query("SELECT * FROM call_transcripts ORDER BY timestampMs DESC LIMIT 200")
+    @Query("SELECT * FROM call_transcripts WHERE isDeleted = 0 ORDER BY timestampMs DESC LIMIT 250")
     fun observeAll(): Flow<List<CallTranscriptEntity>>
 
-    @Query("SELECT * FROM call_transcripts WHERE status = 'PENDING' ORDER BY timestampMs DESC LIMIT 10")
+    @Query("SELECT * FROM call_transcripts WHERE isDeleted = 0 AND status = 'PENDING' ORDER BY timestampMs DESC LIMIT 10")
     suspend fun getPending(): List<CallTranscriptEntity>
 
-    @Query("SELECT * FROM call_transcripts WHERE contactId = :contactId OR phone LIKE '%' || :phoneSuffix ORDER BY timestampMs DESC")
+    @Query(
+        """
+        SELECT * FROM call_transcripts
+        WHERE isDeleted = 0
+          AND ((:contactId != '' AND contactId = :contactId) OR (:phoneSuffix != '' AND phone LIKE '%' || :phoneSuffix))
+        ORDER BY timestampMs DESC
+        """
+    )
+    fun observeForContactOrPhone(contactId: String, phoneSuffix: String): Flow<List<CallTranscriptEntity>>
+
+    @Query(
+        """
+        SELECT * FROM call_transcripts
+        WHERE isDeleted = 0
+          AND ((:contactId != '' AND contactId = :contactId) OR (:phoneSuffix != '' AND phone LIKE '%' || :phoneSuffix))
+        ORDER BY timestampMs DESC
+        """
+    )
     suspend fun getForContactOrPhone(contactId: String, phoneSuffix: String): List<CallTranscriptEntity>
 
-    @Query("SELECT * FROM call_transcripts WHERE id = :id LIMIT 1")
+    @Query(
+        """
+        SELECT * FROM call_transcripts
+        WHERE isDeleted = 0
+          AND ((:contactId != '' AND contactId = :contactId) OR (:phoneSuffix != '' AND phone LIKE '%' || :phoneSuffix))
+        ORDER BY timestampMs DESC
+        LIMIT 1
+        """
+    )
+    suspend fun getLatestForContactOrPhone(contactId: String, phoneSuffix: String): CallTranscriptEntity?
+
+    @Query(
+        """
+        SELECT * FROM call_transcripts
+        WHERE isDeleted = 0
+          AND (
+            transcript LIKE '%' || :query || '%'
+            OR extractedNotes LIKE '%' || :query || '%'
+            OR highlightsJoined LIKE '%' || :query || '%'
+            OR summaryBulletsJoined LIKE '%' || :query || '%'
+            OR oneLineSummary LIKE '%' || :query || '%'
+            OR actionItemsJson LIKE '%' || :query || '%'
+            OR contactName LIKE '%' || :query || '%'
+            OR phone LIKE '%' || :query || '%'
+          )
+        ORDER BY timestampMs DESC
+        LIMIT :limit
+        """
+    )
+    suspend fun searchTranscripts(query: String, limit: Int = 60): List<CallTranscriptEntity>
+
+    @Query("SELECT * FROM call_transcripts WHERE id = :id AND isDeleted = 0 LIMIT 1")
     suspend fun getById(id: String): CallTranscriptEntity?
+
+    @Query("SELECT * FROM call_transcripts WHERE id = :id LIMIT 1")
+    suspend fun getByIdEvenIfDeleted(id: String): CallTranscriptEntity?
+
+    @Query("SELECT audioFilePath FROM call_transcripts WHERE isDeleted = 0 AND audioFilePath != ''")
+    suspend fun getAllReferencedAudioPaths(): List<String>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(item: CallTranscriptEntity)
 
-    @Query("UPDATE call_transcripts SET eventAddedToCalendar = 1 WHERE id = :id")
-    suspend fun markCalendarAdded(id: String)
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(items: List<CallTranscriptEntity>)
 
-    @Query("UPDATE call_transcripts SET notesSavedToContact = 1 WHERE id = :id")
-    suspend fun markNotesSaved(id: String)
+    @Query("UPDATE call_transcripts SET eventAddedToCalendar = 1, updatedAtEpochMs = :updatedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun markCalendarAdded(id: String, updatedAtMs: Long = System.currentTimeMillis(), syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE call_transcripts SET notesSavedToContact = 1, updatedAtEpochMs = :updatedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun markNotesSaved(id: String, updatedAtMs: Long = System.currentTimeMillis(), syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE call_transcripts SET isDeleted = 1, deletedAtEpochMs = :deletedAtMs, updatedAtEpochMs = :deletedAtMs, syncState = :syncState WHERE id = :id")
+    suspend fun softDelete(id: String, deletedAtMs: Long, syncState: String = SyncState.PENDING.name)
+
+    @Query("UPDATE call_transcripts SET syncState = :syncState WHERE id = :id")
+    suspend fun markSyncState(id: String, syncState: String)
 
     @Query("DELETE FROM call_transcripts WHERE id = :id")
     suspend fun deleteById(id: String)
@@ -336,4 +529,40 @@ interface DialHistoryDao {
 
     @Query("DELETE FROM dial_history WHERE isDeleted = 1")
     suspend fun emptyTrash()
+}
+
+@Dao
+interface PendingSyncDao {
+    @Query("SELECT COUNT(*) FROM pending_sync_queue")
+    fun observePendingCount(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM pending_sync_queue")
+    suspend fun getPendingCount(): Int
+
+    @Query("SELECT * FROM pending_sync_queue ORDER BY enqueuedAtEpochMs ASC LIMIT :limit")
+    suspend fun getPendingBatch(limit: Int = 50): List<PendingSyncEntity>
+
+    @Query("SELECT * FROM pending_sync_queue WHERE entityType = :entityType AND entityId = :entityId LIMIT 1")
+    suspend fun getByEntity(entityType: String, entityId: String): PendingSyncEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun enqueue(item: PendingSyncEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun enqueueBatch(items: List<PendingSyncEntity>)
+
+    @Query("DELETE FROM pending_sync_queue WHERE queueKey = :queueKey")
+    suspend fun remove(queueKey: String)
+
+    @Query("DELETE FROM pending_sync_queue WHERE queueKey IN (:queueKeys)")
+    suspend fun removeBatch(queueKeys: List<String>)
+
+    @Query("DELETE FROM pending_sync_queue WHERE entityType = :entityType AND entityId = :entityId")
+    suspend fun removeByEntity(entityType: String, entityId: String)
+
+    @Query("UPDATE pending_sync_queue SET retryCount = retryCount + 1, lastError = :error WHERE queueKey = :queueKey")
+    suspend fun markRetryFailure(queueKey: String, error: String)
+
+    @Query("DELETE FROM pending_sync_queue")
+    suspend fun clearAll()
 }

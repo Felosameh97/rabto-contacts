@@ -2,6 +2,10 @@
     <string name="app_name">Felo Contacts</string>
     <string name="tagline">مدير جهات الاتصال والمكالمات الذكي</string>
     <string name="nav_home">الرئيسية</string>
+    <string name="nav_keypad">لوحة الاتصال</string>
+    <string name="nav_recents">المكالمات</string>
+    <string name="nav_contacts">جهات الاتصال</string>
+    <string name="nav_ai_vault">خزنة الذكاء</string>
     <string name="nav_categories">الفئات</string>
     <string name="nav_tools">الإعدادات</string>
     <string name="nav_dialpad">الكيباد</string>

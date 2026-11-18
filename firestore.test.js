@@ -252,3 +252,95 @@ test("Categories, WhatsApp logs, Payment templates, and UserProfile rules enforc
     })
   );
 });
+
+test("Call logs and call transcripts enforce owner isolation and strict schemas", async () => {
+  const aliceDb = dbFor(ALICE_UID);
+  const bobDb = dbFor(BOB_UID);
+
+  // Valid contact with new Phase 1 fields
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/contacts/c_phase1`).set({
+      displayName: "Kareem Adel",
+      primaryPhone: "+201099887766",
+      phones: ["+201099887766"],
+      emails: [],
+      categoryPaths: ["العمل"],
+      syncedToDevice: false,
+      isFavorite: false,
+      avatarColorSeed: 42,
+      muted: true,
+      blocked: false,
+      lastContactedEpochMs: Date.now(),
+      clientUpdatedAtMs: Date.now(),
+      createdAt: serverTs(),
+      updatedAt: serverTs(),
+    })
+  );
+
+  // Valid call log
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/call_logs/cl_1`).set({
+      contactId: "c_phase1",
+      phoneNumber: "+201099887766",
+      cachedName: "Kareem Adel",
+      callType: 2,
+      simSlot: 0,
+      timestampMs: Date.now(),
+      durationSec: 120,
+      transcriptId: "tr_1",
+      hasRecording: true,
+      notes: "Discussed meeting tomorrow at 10am",
+      clientUpdatedAtMs: Date.now(),
+      createdAt: serverTs(),
+      updatedAt: serverTs(),
+    })
+  );
+
+  // Valid call transcript
+  await assertSucceeds(
+    aliceDb.doc(`users/${ALICE_UID}/call_transcripts/tr_1`).set({
+      contactId: "c_phase1",
+      phone: "+201099887766",
+      contactName: "Kareem Adel",
+      audioFileName: "rabta_kareem.m4a",
+      audioSizeBytes: 24500,
+      timestampMs: Date.now(),
+      durationSec: 120,
+      transcript: "بكرة الاجتماع الساعة 10 الصبح ان شاء الله",
+      highlights: ["بكرة الاجتماع الساعة 10 الصبح"],
+      summaryBullets: ["تأكيد اجتماع الغد الساعة 10 صباحاً"],
+      oneLineSummary: "تأكيد اجتماع الغد 10:00",
+      segmentsJson: "[]",
+      actionItemsJson: "[]",
+      eventAdded: false,
+      notesSaved: true,
+      status: "READY",
+      clientUpdatedAtMs: Date.now(),
+      createdAt: serverTs(),
+      updatedAt: serverTs(),
+    })
+  );
+
+  // Cross-user access denied
+  await assertFails(bobDb.doc(`users/${ALICE_UID}/call_logs/cl_1`).get());
+  await assertFails(bobDb.doc(`users/${ALICE_UID}/call_transcripts/tr_1`).get());
+
+  // Invalid status rejected
+  await assertFails(
+    aliceDb.doc(`users/${ALICE_UID}/call_transcripts/tr_bad`).set({
+      phone: "+201099887766",
+      contactName: "Bad",
+      audioSizeBytes: 0,
+      timestampMs: Date.now(),
+      durationSec: 10,
+      highlights: [],
+      summaryBullets: [],
+      eventAdded: false,
+      notesSaved: false,
+      status: "UNKNOWN_INVALID",
+      clientUpdatedAtMs: Date.now(),
+      createdAt: serverTs(),
+      updatedAt: serverTs(),
+    })
+  );
+});

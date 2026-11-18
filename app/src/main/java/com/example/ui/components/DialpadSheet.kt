@@ -1125,30 +1125,16 @@ fun DialpadContent(
 
 @Composable
 private fun DialpadAvatar(contact: ContactRecord, showPhoto: Boolean) {
-    val hasPhoto = showPhoto && !contact.photoUri.isNullOrBlank() && File(contact.photoUri).exists()
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (hasPhoto) {
-            AsyncImage(
-                model = File(contact.photoUri!!),
-                contentDescription = contact.displayName,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Text(
-                text = contact.displayName.trim().firstOrNull()?.uppercase() ?: "#",
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-    }
+    ContactAvatarBadge(
+        displayName = contact.displayName,
+        phone = contact.primaryPhone,
+        photoUri = contact.photoUri,
+        colorSeed = contact.avatarColorSeed,
+        showPhoto = showPhoto,
+        size = 40.dp,
+        isBlocked = contact.blocked,
+        isMuted = contact.muted,
+    )
 }
 
 @Composable

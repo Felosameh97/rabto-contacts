@@ -23,13 +23,22 @@ import android.telecom.CallAudioState
 import android.telecom.InCallService
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
+import android.provider.CallLog
 import androidx.core.app.NotificationCompat
 import com.example.R
 import com.example.ai.LocalTranscriptAnalyzer
+import com.example.data.local.AppCallLogEntity
 import com.example.data.local.CallTranscriptEntity
+import com.example.data.local.LocalMediaCacheManager
+import com.example.data.local.PendingSyncEntity
 import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
+import com.example.data.local.TranscriptConverters
 import com.example.domain.model.ContactRecord
+import com.example.domain.model.PreCallContext
+import com.example.domain.model.SyncEntityType
+import com.example.domain.model.SyncOperation
+import com.example.domain.model.SyncState
 import com.example.util.EgyptGeoLookup
 import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
@@ -53,12 +62,16 @@ data class ActiveCallUiState(
     val phoneNumber: String = "",
     val matchedContact: ContactRecord? = null,
     val callerInsight: String? = null,
+    val preCallContext: PreCallContext? = null,
+    val hideLockscreenDetails: Boolean = false,
+    val isBlockedCaller: Boolean = false,
     val elapsedSec: Long = 0L,
     val isMuted: Boolean = false,
     val isSpeaker: Boolean = false,
     val isOnHold: Boolean = false,
     val isNearEar: Boolean = false,
     val isRecording: Boolean = false,
+    val isRecordAndAiMode: Boolean = false,
     val recordingAmplitude: Int = 0,
     val recordingSourceName: String = "",
     val isLiveTranscribing: Boolean = false,
@@ -73,6 +86,9 @@ data class PostCallSummary(
     val durationSec: Long,
     val hasRecording: Boolean,
     val endedAtMs: Long,
+    val transcriptId: String? = null,
+    val oneLineSummary: String? = null,
+    val aiRequested: Boolean = false,
 )
 
 class RabtaInCallService : InCallService(), SensorEventListener {
@@ -83,6 +99,8 @@ class RabtaInCallService : InCallService(), SensorEventListener {
     private var amplitudeJob: Job? = null
     private var activeCall: Call? = null
     private var callStartTimeMs: Long = 0L
+    private var callAddedTimeMs: Long = 0L
+    private var callTypeForCurrentCall: Int = CallLog.Calls.OUTGOING_TYPE
     private var callLoggedForCurrentCall: Boolean = false
     private var didVibrateOnActive: Boolean = false
     private var lastSavedRecordingFile: File? = null
@@ -212,13 +230,23 @@ class RabtaInCallService : InCallService(), SensorEventListener {
         val rawNumber = call.details?.handle?.schemeSpecificPart.orEmpty()
         val normalized = PhoneUtils.normalizePhone(rawNumber).ifBlank { rawNumber }
         callStartTimeMs = 0L
+        callAddedTimeMs = System.currentTimeMillis()
+        val initialState = call.details?.state ?: Call.STATE_CONNECTING
+        callTypeForCurrentCall = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            when (call.details?.callDirection) {
+                Call.Details.DIRECTION_INCOMING -> CallLog.Calls.INCOMING_TYPE
+                Call.Details.DIRECTION_OUTGOING -> CallLog.Calls.OUTGOING_TYPE
+                else -> if (initialState == Call.STATE_RINGING) CallLog.Calls.INCOMING_TYPE else CallLog.Calls.OUTGOING_TYPE
+            }
+        } else {
+            if (initialState == Call.STATE_RINGING) CallLog.Calls.INCOMING_TYPE else CallLog.Calls.OUTGOING_TYPE
+        }
         callLoggedForCurrentCall = false
         didVibrateOnActive = false
         lastSavedRecordingFile = null
         collectedLiveText = ""
         speechTranscriber?.clear()
 
-        val initialState = call.details?.state ?: Call.STATE_CONNECTING
         val initialInsight = EgyptGeoLookup.inferCallerInsight(normalized)
 
         _uiState.value = ActiveCallUiState(
@@ -233,16 +261,56 @@ class RabtaInCallService : InCallService(), SensorEventListener {
         updateProximityLockState(enable = initialState != Call.STATE_RINGING)
 
         serviceScope.launch(Dispatchers.IO) {
+            val prefs = SyncPrefsDataStore(applicationContext)
+            val hideDetails = prefs.hideLockscreenCallerDetailsFlow.firstOrNull() ?: false
+            val db = RabtaDatabase.getInstance(applicationContext)
             val key = PhoneUtils.phoneSearchKey(normalized)
             val matched = if (key.length >= 4) {
-                RabtaDatabase.getInstance(applicationContext)
-                    .contactDao()
-                    .findByExactPhoneKey(key)
-                    ?.toDomain()
+                db.contactDao().findByExactPhoneKey(key)?.toDomain()
+            } else null
+
+            if (initialState == Call.STATE_RINGING && matched?.blocked == true) {
+                _uiState.value = _uiState.value.copy(
+                    matchedContact = matched,
+                    hideLockscreenDetails = hideDetails,
+                    isBlockedCaller = true,
+                    callerInsight = "تم حظر هذه المكالمة تلقائياً",
+                )
+                serviceScope.launch(Dispatchers.Main.immediate) {
+                    runCatching { call.reject(false, null) }
+                }
+                return@launch
+            }
+
+            val preCtx = if (matched != null || key.length >= 4) {
+                val logs = db.appCallLogDao().getForContactOrPhoneOnce(matched?.id, key, limit = 50)
+                val latestTr = db.callTranscriptDao().getLatestForContactOrPhone(
+                    contactId = matched?.id.orEmpty(),
+                    phoneSuffix = key,
+                )?.toDomain()
+                val lastLog = logs.firstOrNull()
+                val summary = latestTr?.oneLineSummary?.takeIf { it.isNotBlank() }
+                    ?: latestTr?.highlights?.firstOrNull()?.takeIf { it.isNotBlank() }
+                    ?: latestTr?.extractedNotes?.takeIf { it.isNotBlank() }
+                val pendingActions = latestTr?.actionItems?.count { !it.completed } ?: 0
+                if (lastLog != null || latestTr != null) {
+                    PreCallContext(
+                        contactId = matched?.id ?: latestTr?.contactId ?: lastLog?.contactId,
+                        phoneNumber = normalized.ifBlank { lastLog?.phoneNumber.orEmpty() },
+                        lastSpokeEpochMs = lastLog?.timestampMs ?: latestTr?.timestampMs,
+                        lastCallDurationSec = lastLog?.durationSec ?: latestTr?.durationSec ?: 0L,
+                        lastCallType = lastLog?.callType,
+                        oneLineSummary = summary,
+                        pendingActionItemsCount = pendingActions,
+                        totalCallsCount = logs.size,
+                    )
+                } else null
             } else null
 
             _uiState.value = _uiState.value.copy(
                 matchedContact = matched,
+                preCallContext = preCtx,
+                hideLockscreenDetails = hideDetails,
                 callerInsight = if (matched == null) initialInsight else null,
             )
             postCallNotification(_uiState.value)
@@ -431,24 +499,37 @@ class RabtaInCallService : InCallService(), SensorEventListener {
         if (snapshot.phoneNumber.isBlank() && audioFile == null && liveText.isBlank()) return
         callLoggedForCurrentCall = true
 
+        val nowMs = System.currentTimeMillis()
         val duration = if (callStartTimeMs > 0L) {
-            ((System.currentTimeMillis() - callStartTimeMs) / 1000L).coerceAtLeast(1L)
+            ((nowMs - callStartTimeMs) / 1000L).coerceAtLeast(1L)
         } else {
             snapshot.elapsedSec
         }
+        val finalCallType = if (callTypeForCurrentCall == CallLog.Calls.INCOMING_TYPE && callStartTimeMs == 0L) {
+            CallLog.Calls.MISSED_TYPE
+        } else {
+            callTypeForCurrentCall
+        }
+
         val contactId = snapshot.matchedContact?.id
         val contactName = snapshot.matchedContact?.displayName
             ?.ifBlank { snapshot.phoneNumber }
             ?: snapshot.phoneNumber.ifBlank { "مكالمة" }
+        val hasValidAudio = audioFile != null && audioFile.exists() && audioFile.length() > 256L
+        val audioSizeBytes = if (hasValidAudio) audioFile!!.length() else 0L
+        val audioFileName = audioFile?.name.orEmpty()
+        val transcriptId = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14)
 
         val entry = if (liveText.isNotBlank()) {
             val localAnalysis = LocalTranscriptAnalyzer.analyze(
                 rawTranscript = liveText,
                 contactName = contactName,
                 phone = snapshot.phoneNumber,
+                referenceTimeMs = nowMs,
+                durationSec = duration,
             )
             CallTranscriptEntity(
-                id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
+                id = transcriptId,
                 contactId = contactId,
                 phone = snapshot.phoneNumber,
                 contactName = contactName,
@@ -459,22 +540,63 @@ class RabtaInCallService : InCallService(), SensorEventListener {
                 suggestedEventTitle = localAnalysis.eventTitle,
                 suggestedEventDateIso = localAnalysis.eventDateIso,
                 suggestedEventEpochMs = localAnalysis.eventEpochMs,
-                timestampMs = System.currentTimeMillis(),
+                timestampMs = nowMs,
                 durationSec = duration,
                 status = "READY",
+                summaryBulletsJoined = localAnalysis.summaryBullets.joinToString("\u001F"),
+                oneLineSummary = localAnalysis.oneLineSummary,
+                segmentsJson = TranscriptConverters.encodeSegments(localAnalysis.segments),
+                actionItemsJson = TranscriptConverters.encodeActionItems(localAnalysis.actionItems),
+                audioFileName = audioFileName,
+                audioSizeBytes = audioSizeBytes,
+                audioCachedLocally = hasValidAudio,
+                updatedAtEpochMs = nowMs,
+                syncState = SyncState.PENDING.name,
             )
         } else {
             CallTranscriptEntity(
-                id = "tr_" + UUID.randomUUID().toString().replace("-", "").take(14),
+                id = transcriptId,
                 contactId = contactId,
                 phone = snapshot.phoneNumber,
                 contactName = contactName,
                 audioFilePath = audioFile?.absolutePath.orEmpty(),
-                timestampMs = System.currentTimeMillis(),
+                timestampMs = nowMs,
                 durationSec = duration,
-                status = if (audioFile != null && audioFile.exists() && audioFile.length() > 256L) "PENDING" else "NO_AUDIO",
+                status = when {
+                    hasValidAudio && snapshot.isRecordAndAiMode -> "PENDING_AI"
+                    hasValidAudio -> "PENDING"
+                    else -> "NO_AUDIO"
+                },
+                audioFileName = audioFileName,
+                audioSizeBytes = audioSizeBytes,
+                audioCachedLocally = hasValidAudio,
+                updatedAtEpochMs = nowMs,
+                syncState = SyncState.PENDING.name,
             )
         }
+
+        val callPhone = snapshot.phoneNumber.ifBlank { contactName }
+        val phoneKey = PhoneUtils.phoneSearchKey(callPhone).ifBlank { callPhone }
+        val callTs = callAddedTimeMs.takeIf { it > 0L } ?: nowMs
+        val safeKey = phoneKey.replace(Regex("[^a-zA-Z0-9]"), "").ifBlank { "call" }
+        val callLogEntry = AppCallLogEntity(
+            id = "cl_${callTs}_${safeKey}".take(120),
+            contactId = contactId,
+            phoneNumber = callPhone,
+            phoneKey = phoneKey,
+            cachedName = snapshot.matchedContact?.displayName,
+            callType = finalCallType,
+            simSlot = null,
+            timestampMs = callTs,
+            durationSec = duration,
+            transcriptId = entry.id,
+            hasRecording = hasValidAudio,
+            notes = entry.oneLineSummary.takeIf { it.isNotBlank() },
+            isDeleted = false,
+            deletedAtEpochMs = null,
+            updatedAtEpochMs = nowMs,
+            syncState = SyncState.PENDING.name,
+        )
 
         if (snapshot.phoneNumber.isNotBlank()) {
             _lastEndedCallSummary.value = PostCallSummary(
@@ -482,14 +604,56 @@ class RabtaInCallService : InCallService(), SensorEventListener {
                 contactId = contactId,
                 contactName = contactName,
                 durationSec = duration,
-                hasRecording = audioFile != null && audioFile.exists() && audioFile.length() > 256L,
-                endedAtMs = System.currentTimeMillis(),
+                hasRecording = hasValidAudio,
+                endedAtMs = nowMs,
+                transcriptId = entry.id,
+                oneLineSummary = entry.oneLineSummary.takeIf { it.isNotBlank() },
+                aiRequested = snapshot.isRecordAndAiMode,
             )
         }
 
         serviceScope.launch(Dispatchers.IO) {
             runCatching {
-                RabtaDatabase.getInstance(applicationContext).callTranscriptDao().upsert(entry)
+                val room = RabtaDatabase.getInstance(applicationContext)
+                if (hasValidAudio && audioFile != null) {
+                    LocalMediaCacheManager.ensureRecordingCachedLocally(applicationContext, audioFile)
+                }
+                room.callTranscriptDao().upsert(entry)
+                room.appCallLogDao().upsert(callLogEntry)
+                if (contactId != null) {
+                    room.contactDao().updateLastContacted(contactId, nowMs)
+                }
+                room.pendingSyncDao().enqueueBatch(
+                    listOfNotNull(
+                        PendingSyncEntity(
+                            queueKey = PendingSyncEntity.keyFor(SyncEntityType.CALL_TRANSCRIPT.name, entry.id),
+                            entityType = SyncEntityType.CALL_TRANSCRIPT.name,
+                            entityId = entry.id,
+                            operation = SyncOperation.UPSERT.name,
+                            enqueuedAtEpochMs = nowMs,
+                            entityUpdatedAtEpochMs = nowMs,
+                        ),
+                        PendingSyncEntity(
+                            queueKey = PendingSyncEntity.keyFor(SyncEntityType.CALL_LOG.name, callLogEntry.id),
+                            entityType = SyncEntityType.CALL_LOG.name,
+                            entityId = callLogEntry.id,
+                            operation = SyncOperation.UPSERT.name,
+                            enqueuedAtEpochMs = nowMs,
+                            entityUpdatedAtEpochMs = nowMs,
+                        ),
+                        contactId?.let { cid ->
+                            PendingSyncEntity(
+                                queueKey = PendingSyncEntity.keyFor(SyncEntityType.CONTACT.name, cid),
+                                entityType = SyncEntityType.CONTACT.name,
+                                entityId = cid,
+                                operation = SyncOperation.UPSERT.name,
+                                enqueuedAtEpochMs = nowMs,
+                                entityUpdatedAtEpochMs = nowMs,
+                            )
+                        },
+                    )
+                )
+                LocalMediaCacheManager.cacheTranscriptPayloadLocally(applicationContext, entry.toDomain())
             }
         }
     }
@@ -523,23 +687,37 @@ class RabtaInCallService : InCallService(), SensorEventListener {
             fullScreenIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val isMutedContact = state.matchedContact?.muted == true
         val title = state.matchedContact?.displayName?.ifBlank { state.phoneNumber } ?: state.phoneNumber
         val subtitle = when (state.callState) {
-            Call.STATE_RINGING -> "مكالمة واردة..."
+            Call.STATE_RINGING -> if (isMutedContact) "مكالمة واردة (صامت)" else "مكالمة واردة..."
             Call.STATE_ACTIVE -> "مكالمة جارية"
             Call.STATE_HOLDING -> "قيد الانتظار"
             else -> "جاري الاتصال..."
         }
-        return NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title.ifBlank { "مكالمة Felo Contacts" })
             .setContentText(subtitle)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(if (isMutedContact) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
+            .setSilent(isMutedContact)
             .setContentIntent(pi)
             .setFullScreenIntent(pi, true)
-            .build()
+
+        if (state.hideLockscreenDetails) {
+            val publicVersion = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle("مكالمة Felo Contacts")
+                .setContentText("هوية المتصل مخفية على شاشة القفل للخصوصية")
+                .setOngoing(true)
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .build()
+            builder.setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(publicVersion)
+        }
+        return builder.build()
     }
 
     private fun postCallNotification(state: ActiveCallUiState) {
@@ -658,8 +836,23 @@ class RabtaInCallService : InCallService(), SensorEventListener {
             val svc = instance ?: return
             if (_uiState.value.isRecording) {
                 svc.stopRecordingInternal()
+                _uiState.value = _uiState.value.copy(isRecordAndAiMode = false)
             } else {
                 svc.startRecordingInternal()
+            }
+        }
+
+        fun toggleRecordAndTranscribe() {
+            val svc = instance ?: return
+            if (_uiState.value.isRecording) {
+                svc.stopRecordingInternal()
+                _uiState.value = _uiState.value.copy(isRecordAndAiMode = false)
+            } else {
+                svc.startRecordingInternal()
+                _uiState.value = _uiState.value.copy(
+                    isRecordAndAiMode = true,
+                    recordingStatusNote = "تسجيل + تلخيص بالذكاء الاصطناعي AI",
+                )
             }
         }
 

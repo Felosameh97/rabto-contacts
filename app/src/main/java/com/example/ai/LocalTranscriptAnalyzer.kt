@@ -1,6 +1,8 @@
 package com.example.ai
 
+import com.example.domain.model.CallActionItem
 import com.example.domain.model.ContactRecord
+import com.example.domain.model.TranscriptSegment
 import com.example.util.PhoneUtils
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -14,6 +16,10 @@ data class LocalTranscriptAnalysis(
     val eventTitle: String,
     val eventDateIso: String,
     val eventEpochMs: Long?,
+    val summaryBullets: List<String> = emptyList(),
+    val oneLineSummary: String = "",
+    val segments: List<TranscriptSegment> = emptyList(),
+    val actionItems: List<CallActionItem> = emptyList(),
 )
 
 /**
@@ -45,6 +51,7 @@ object LocalTranscriptAnalyzer {
         contactName: String,
         phone: String,
         referenceTimeMs: Long = System.currentTimeMillis(),
+        durationSec: Long = 0L,
     ): LocalTranscriptAnalysis {
         val clean = rawTranscript.trim()
         if (clean.isBlank()) {
@@ -75,6 +82,80 @@ object LocalTranscriptAnalyzer {
             }
         }
 
+        val summaryBullets = buildList {
+            highlights.take(3).forEach { add(it.take(160)) }
+            if (isEmpty() && sentences.isNotEmpty()) {
+                sentences.take(3).forEach { add(it.take(160)) }
+            }
+        }
+
+        val oneLineSummary = when {
+            eventInfo != null && eventInfo.first.isNotBlank() ->
+                "${eventInfo.first} (${eventInfo.second})"
+            summaryBullets.isNotEmpty() ->
+                summaryBullets.first().take(140)
+            else ->
+                clean.take(140)
+        }
+
+        val speakerLabel = contactName.ifBlank { phone.ifBlank { "المتصل" } }
+        val totalMs = (durationSec.coerceAtLeast(sentences.size.toLong() * 4L)) * 1000L
+        val stepMs = if (sentences.isNotEmpty()) (totalMs / sentences.size.coerceAtLeast(1)).coerceAtLeast(2500L) else 4000L
+        val segments = if (sentences.isEmpty()) {
+            listOf(
+                TranscriptSegment(
+                    startMs = 0L,
+                    endMs = totalMs.coerceAtLeast(3000L),
+                    speaker = speakerLabel,
+                    text = clean,
+                )
+            )
+        } else {
+            sentences.mapIndexed { idx, line ->
+                val start = idx * stepMs
+                TranscriptSegment(
+                    startMs = start,
+                    endMs = start + stepMs,
+                    speaker = if (idx % 2 == 0) speakerLabel else "أنت",
+                    text = line,
+                )
+            }
+        }
+
+        val actionItems = buildList {
+            if (eventInfo != null) {
+                add(
+                    CallActionItem(
+                        id = "act_cal_${referenceTimeMs % 100000}",
+                        title = eventInfo.first,
+                        dueDateIso = eventInfo.second,
+                        dueEpochMs = eventInfo.third,
+                        kind = "CALENDAR",
+                        completed = false,
+                    )
+                )
+            }
+            sentences.forEachIndexed { idx, line ->
+                val low = line.lowercase(Locale.getDefault())
+                val isPayment = low.contains("جنيه") || low.contains("تحويل") || low.contains("فودافون") ||
+                    low.contains("انستاباي") || low.contains("حساب") || low.contains("payment")
+                val isPromise = low.contains("لازم") || low.contains("هكلمك") || low.contains("هبعتلك") ||
+                    low.contains("اتفقنا") || low.contains("تذكير") || low.contains("remind")
+                if ((isPayment || isPromise) && size < 4) {
+                    add(
+                        CallActionItem(
+                            id = "act_${idx}_${referenceTimeMs % 10000}",
+                            title = line.take(120),
+                            dueDateIso = eventInfo?.second.orEmpty(),
+                            dueEpochMs = eventInfo?.third,
+                            kind = if (isPayment) "PAYMENT" else "FOLLOW_UP",
+                            completed = false,
+                        )
+                    )
+                }
+            }
+        }
+
         return LocalTranscriptAnalysis(
             transcript = clean,
             highlights = highlights,
@@ -82,6 +163,10 @@ object LocalTranscriptAnalyzer {
             eventTitle = eventInfo?.first.orEmpty(),
             eventDateIso = eventInfo?.second.orEmpty(),
             eventEpochMs = eventInfo?.third,
+            summaryBullets = summaryBullets,
+            oneLineSummary = oneLineSummary,
+            segments = segments,
+            actionItems = actionItems,
         )
     }
 

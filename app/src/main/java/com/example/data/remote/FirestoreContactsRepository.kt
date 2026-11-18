@@ -3,6 +3,8 @@ package com.example.data.remote
 import android.content.Context
 import com.example.R
 import com.example.domain.model.CategoryNode
+import com.example.domain.model.CloudCallLogRecord
+import com.example.domain.model.CloudCallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.PaymentTemplate
 import com.example.domain.model.UserProfile
@@ -32,6 +34,8 @@ class FirestoreContactsRepository(
     private fun categoriesCol(uid: String) = userDoc(uid).collection("categories")
     private fun logsCol(uid: String) = userDoc(uid).collection("whatsapp_logs")
     private fun templatesCol(uid: String) = userDoc(uid).collection("payment_templates")
+    private fun callLogsCol(uid: String) = userDoc(uid).collection("call_logs")
+    private fun callTranscriptsCol(uid: String) = userDoc(uid).collection("call_transcripts")
 
     suspend fun ensureUserProfile(
         uid: String,
@@ -89,7 +93,8 @@ class FirestoreContactsRepository(
             for (c in chunk) {
                 val id = c.id.ifBlank { "c_" + UUID.randomUUID().toString().replace("-", "").take(16) }
                 val ref = contactsCol(uid).document(id)
-                batch.set(ref, c.copy(id = id).toFirestoreMap(isCreate = true))
+                val isCreate = c.createdAt == null
+                batch.set(ref, c.copy(id = id).toFirestoreMap(isCreate = isCreate))
             }
             batch.commit().await()
             uploaded += chunk.size
@@ -101,10 +106,10 @@ class FirestoreContactsRepository(
         handleFirestoreError(e, OperationType.WRITE, "users/$uid/contacts")
     }
 
-    suspend fun setContactSyncedToDevice(uid: String, contactId: String, synced: Boolean): Result<Unit> = runCatching {
+    suspend fun setContactSyncedToDevice(uid: String, contactId: String, @Suppress("UNUSED_PARAMETER") synced: Boolean): Result<Unit> = runCatching {
         contactsCol(uid).document(contactId).update(
             mapOf(
-                "syncedToDevice" to synced,
+                "syncedToDevice" to false,
                 "updatedAt" to FieldValue.serverTimestamp(),
             )
         ).await()
@@ -258,4 +263,129 @@ class FirestoreContactsRepository(
         templatesCol(uid)
             .snapshots()
             .map { it.toObjects(PaymentTemplate::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+
+    fun observeContacts(uid: String): Flow<List<ContactRecord>> =
+        contactsCol(uid)
+            .orderBy("updatedAt", Query.Direction.DESCENDING)
+            .limit(1000)
+            .snapshots()
+            .map { it.toObjects(ContactRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+
+    suspend fun pullCategories(uid: String): Result<List<CategoryNode>> = runCatching {
+        val snap = categoriesCol(uid).get().await()
+        snap.toObjects(CategoryNode::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.LIST, "users/$uid/categories")
+    }
+
+    suspend fun deleteCategory(uid: String, categoryId: String): Result<Unit> = runCatching {
+        categoriesCol(uid).document(categoryId).delete().await()
+        Unit
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.DELETE, "users/$uid/categories/$categoryId")
+    }
+
+    suspend fun upsertCallLog(uid: String, log: CloudCallLogRecord): Result<CloudCallLogRecord> = runCatching {
+        val id = log.id.ifBlank { "cl_" + UUID.randomUUID().toString().replace("-", "").take(16) }
+        val ref = callLogsCol(uid).document(id)
+        val existing = ref.get().await()
+        val isCreate = !existing.exists()
+        val createdTs = existing.getTimestamp("createdAt")
+        ref.set(log.copy(id = id, createdAt = createdTs).toFirestoreMap(isCreate = isCreate)).await()
+        ref.get().await()
+            .toObject(CloudCallLogRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            ?: log.copy(id = id)
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.WRITE, "users/$uid/call_logs/${log.id}")
+    }
+
+    suspend fun batchUpsertCallLogs(uid: String, logs: List<CloudCallLogRecord>): Result<Int> = runCatching {
+        var uploaded = 0
+        for (chunk in logs.chunked(400)) {
+            val batch = db.batch()
+            for (l in chunk) {
+                val id = l.id.ifBlank { "cl_" + UUID.randomUUID().toString().replace("-", "").take(16) }
+                val isCreate = l.createdAt == null
+                batch.set(callLogsCol(uid).document(id), l.copy(id = id).toFirestoreMap(isCreate = isCreate))
+            }
+            batch.commit().await()
+            uploaded += chunk.size
+        }
+        uploaded
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.WRITE, "users/$uid/call_logs")
+    }
+
+    suspend fun deleteCallLog(uid: String, callLogId: String): Result<Unit> = runCatching {
+        callLogsCol(uid).document(callLogId).delete().await()
+        Unit
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.DELETE, "users/$uid/call_logs/$callLogId")
+    }
+
+    suspend fun pullCallLogs(uid: String, limit: Long = 350): Result<List<CloudCallLogRecord>> = runCatching {
+        val snap = callLogsCol(uid)
+            .orderBy("timestampMs", Query.Direction.DESCENDING)
+            .limit(limit)
+            .get()
+            .await()
+        snap.toObjects(CloudCallLogRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.LIST, "users/$uid/call_logs")
+    }
+
+    fun observeCallLogs(uid: String): Flow<List<CloudCallLogRecord>> =
+        callLogsCol(uid)
+            .orderBy("timestampMs", Query.Direction.DESCENDING)
+            .limit(350)
+            .snapshots()
+            .map { it.toObjects(CloudCallLogRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
+
+    suspend fun upsertCallTranscript(uid: String, transcript: CloudCallTranscriptRecord): Result<CloudCallTranscriptRecord> = runCatching {
+        val id = transcript.id.ifBlank { "tr_" + UUID.randomUUID().toString().replace("-", "").take(14) }
+        val ref = callTranscriptsCol(uid).document(id)
+        val existing = ref.get().await()
+        val isCreate = !existing.exists()
+        val createdTs = existing.getTimestamp("createdAt")
+        ref.set(transcript.copy(id = id, createdAt = createdTs).toFirestoreMap(isCreate = isCreate)).await()
+        ref.get().await()
+            .toObject(CloudCallTranscriptRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            ?: transcript.copy(id = id)
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.WRITE, "users/$uid/call_transcripts/${transcript.id}")
+    }
+
+    suspend fun deleteCallTranscript(uid: String, transcriptId: String): Result<Unit> = runCatching {
+        callTranscriptsCol(uid).document(transcriptId).delete().await()
+        Unit
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.DELETE, "users/$uid/call_transcripts/$transcriptId")
+    }
+
+    suspend fun pullCallTranscripts(uid: String, limit: Long = 250): Result<List<CloudCallTranscriptRecord>> = runCatching {
+        val snap = callTranscriptsCol(uid)
+            .orderBy("timestampMs", Query.Direction.DESCENDING)
+            .limit(limit)
+            .get()
+            .await()
+        snap.toObjects(CloudCallTranscriptRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+    }.onFailure { e ->
+        if (e is CancellationException) throw e
+        handleFirestoreError(e, OperationType.LIST, "users/$uid/call_transcripts")
+    }
+
+    fun observeCallTranscripts(uid: String): Flow<List<CloudCallTranscriptRecord>> =
+        callTranscriptsCol(uid)
+            .orderBy("timestampMs", Query.Direction.DESCENDING)
+            .limit(250)
+            .snapshots()
+            .map { it.toObjects(CloudCallTranscriptRecord::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE) }
 }
