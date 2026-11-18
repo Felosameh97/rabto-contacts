@@ -191,16 +191,20 @@ fun ContactsScreen(
 
     // Track exact item index of every sticky header for instant scrubber jump
     val hasHeaderFavorites = filterMode == ContactsFilterMode.ALL && selectedTag == null && favorites.isNotEmpty()
-    val headerIndexByLetter = remember(groupedAlphabetical, hasHeaderFavorites, totalCount, bundledImported) {
-        val map = mutableMapOf<String, Int>()
-        var idx = 2 // search + filter row
-        if (totalCount == 0 && !bundledImported) idx++
-        if (hasHeaderFavorites) idx += 2 // favorites title + horizontal strip
-        groupedAlphabetical.forEach { (letter, list) ->
-            map[letter] = idx
-            idx += 1 + list.size
-        }
-        map
+    val hasImportBanner = !importProgressText.isNullOrBlank()
+    val hasEmptyImportCard = totalCount == 0 && !bundledImported
+    val headerIndexByLetter = remember(
+        groupedAlphabetical,
+        hasHeaderFavorites,
+        hasImportBanner,
+        hasEmptyImportCard,
+    ) {
+        computeAlphabetHeaderIndices(
+            groupedSizes = groupedAlphabetical.mapValues { it.value.size },
+            hasImportBanner = hasImportBanner,
+            hasEmptyImportCard = hasEmptyImportCard,
+            hasHeaderFavorites = hasHeaderFavorites,
+        )
     }
 
     val fmt = remember { SimpleDateFormat("dd/MM HH:mm", Locale.getDefault()) }
@@ -758,3 +762,22 @@ fun ContactsScreen(
         }
     }
 }
+
+internal fun computeAlphabetHeaderIndices(
+    groupedSizes: Map<String, Int>,
+    hasImportBanner: Boolean,
+    hasEmptyImportCard: Boolean,
+    hasHeaderFavorites: Boolean,
+): Map<String, Int> {
+    val map = LinkedHashMap<String, Int>(groupedSizes.size)
+    var idx = 2 // 0 = search row, 1 = filter chips row
+    if (hasImportBanner) idx++
+    if (hasEmptyImportCard) idx++
+    if (hasHeaderFavorites) idx += 2 // favorites title + horizontal strip
+    groupedSizes.forEach { (letter, count) ->
+        map[letter] = idx
+        idx += 1 + count
+    }
+    return map
+}
+

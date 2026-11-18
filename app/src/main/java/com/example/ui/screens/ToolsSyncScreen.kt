@@ -34,7 +34,11 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Chat
+import androidx.compose.material.icons.rounded.CleaningServices
+import androidx.compose.material.icons.rounded.CloudDone
 import androidx.compose.material.icons.rounded.CloudDownload
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Delete
@@ -96,7 +100,10 @@ import com.example.data.remote.GoogleDriveScanner
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.GitHubReleaseInfo
+import com.example.domain.model.LocalMediaCacheStats
 import com.example.domain.model.PaymentTemplate
+import com.example.domain.model.SyncEngineState
+import com.example.domain.model.SyncStatusBadge
 import com.example.domain.model.WhatsAppLog
 import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
@@ -107,8 +114,10 @@ import com.example.ui.components.SetPinDialog
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.AppLockSecurity
 import com.example.util.SimPreference
 import com.example.util.SystemIntents
+import com.example.util.VaultActionHelper
 import com.google.android.gms.auth.api.identity.Identity
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.LinearProgressIndicator
@@ -147,6 +156,8 @@ fun ToolsSyncScreen(
     biometricLockEnabled: Boolean = true,
     hideLockscreenCallerDetails: Boolean = false,
     duplicateClustersCount: Int = 0,
+    syncEngineState: SyncEngineState = SyncEngineState(),
+    cacheStats: LocalMediaCacheStats = LocalMediaCacheStats(),
     onSetThemeMode: (ThemeMode) -> Unit,
     onSetCalmPalette: (CalmPalette) -> Unit,
     onSetAutoRecordCalls: (Boolean) -> Unit,
@@ -169,6 +180,8 @@ fun ToolsSyncScreen(
     onDeleteRecording: (CallRecordingItem) -> Unit,
     onTranscribeRecording: (CallRecordingItem) -> Unit = {},
     onOpenLiveTranscriber: () -> Unit = {},
+    onSyncNow: () -> Unit = {},
+    onPurgeOrphanedCache: () -> Unit = {},
     onImportBundledCsv: () -> Unit,
     onImportDevicePhonebook: () -> Unit,
     onScanGoogleDrive: (String) -> Unit,
@@ -321,6 +334,75 @@ fun ToolsSyncScreen(
                                 label = { Text(pal.labelAr) },
                                 modifier = Modifier.testTag("theme_palette_${pal.name}"),
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 0.25: Offline-First Sync Health & Local Cache Diagnostics
+        item {
+            Card(
+                shape = RoundedCornerShape(20.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                modifier = Modifier.fillMaxWidth().testTag("settings_sync_health_card"),
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        val icon = when (syncEngineState.status) {
+                            SyncStatusBadge.OFFLINE -> Icons.Rounded.CloudOff
+                            SyncStatusBadge.SYNCING -> Icons.Rounded.CloudSync
+                            else -> Icons.Rounded.CloudDone
+                        }
+                        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Text("صحة المزامنة والكاش المحلي", style = MaterialTheme.typography.titleMedium)
+                    }
+                    val lastSyncLabel = if (syncEngineState.lastSyncEpochMs > 0L) {
+                        AppLockSecurity.formatRelativeTimeAr(syncEngineState.lastSyncEpochMs)
+                    } else {
+                        "لم تتم مزامنة بعد"
+                    }
+                    Text(
+                        text = buildString {
+                            append(if (syncEngineState.isOnline) "متصل بالإنترنت" else "وضع أوفلاين (الحفظ محلي فوري)")
+                            append(" • بانتظار الرفع: ${syncEngineState.pendingCount}")
+                            append(" • آخر مزامنة: $lastSyncLabel")
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        text = "الكاش المحلي: ${cacheStats.recordingFilesCount} تسجيل صوتي • ${cacheStats.photoFilesCount} صورة • ${cacheStats.transcriptCacheCount} ملخص (${VaultActionHelper.formatBytesReadable(cacheStats.totalBytes)})",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    syncEngineState.lastError?.takeIf { it.isNotBlank() }?.let { err ->
+                        Text(
+                            text = "آخر ملاحظة مزامنة: $err",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilledTonalButton(
+                            onClick = onSyncNow,
+                            enabled = syncEngineState.status != SyncStatusBadge.SYNCING,
+                            modifier = Modifier.weight(1f).testTag("tools_sync_now_btn"),
+                        ) {
+                            Icon(Icons.Rounded.CloudSync, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("مزامنة الآن", maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = onPurgeOrphanedCache,
+                            modifier = Modifier.weight(1f).testTag("tools_purge_cache_btn"),
+                        ) {
+                            Icon(Icons.Rounded.CleaningServices, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("تنظيف الكاش", maxLines = 1)
                         }
                     }
                 }

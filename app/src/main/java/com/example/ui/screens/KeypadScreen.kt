@@ -6,10 +6,18 @@ import android.content.Context
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +47,7 @@ import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.RestoreFromTrash
@@ -46,6 +55,7 @@ import androidx.compose.material.icons.rounded.SimCard
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.FilterChip
@@ -57,13 +67,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
@@ -144,6 +157,7 @@ fun KeypadScreen(
     val haptic = LocalHapticFeedback.current
 
     var digits by remember(initialDigits) { mutableStateOf(initialDigits) }
+    var isDialpadExpanded by rememberSaveable { mutableStateOf(true) }
     var topListMode by remember { mutableStateOf("AUTO") } // AUTO | HISTORY | TRASH
     var pendingCallSlot by remember { mutableStateOf<Int?>(null) }
     var pendingCallNumber by remember { mutableStateOf("") }
@@ -473,6 +487,7 @@ fun KeypadScreen(
                                             .clickable {
                                                 digits = entry.phoneNumber
                                                 topListMode = "AUTO"
+                                                isDialpadExpanded = true
                                             },
                                     ) {
                                         Row(
@@ -589,220 +604,320 @@ fun KeypadScreen(
                 }
             }
 
-            // Sleek Number Display Bar with Paste & Long-Press-to-Clear Backspace
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier.fillMaxWidth(),
+            // Smooth Swipe-Down / Collapsible Dialpad Drawer
+            AnimatedVisibility(
+                visible = isDialpadExpanded,
+                enter = expandVertically(
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioLowBouncy,
+                        stiffness = Spring.StiffnessMediumLow,
+                    ),
+                ) + fadeIn(),
+                exit = shrinkVertically(
+                    animationSpec = spring(stiffness = Spring.StiffnessMedium),
+                ) + fadeOut(),
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(
-                        onClick = {
-                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            val clipText = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
-                            val cleaned = clipText.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
-                            if (cleaned.isNotBlank()) {
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                digits = cleaned
+                var drawerDragDelta by remember { mutableFloatStateOf(0f) }
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Drag / Tap Handle to collapse keypad smoothly
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .pointerInput(Unit) {
+                                detectVerticalDragGestures(
+                                    onDragEnd = { drawerDragDelta = 0f },
+                                    onDragCancel = { drawerDragDelta = 0f },
+                                    onVerticalDrag = { change, dragAmount ->
+                                        change.consume()
+                                        drawerDragDelta += dragAmount
+                                        if (drawerDragDelta > 34f) {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            isDialpadExpanded = false
+                                            drawerDragDelta = 0f
+                                        }
+                                    },
+                                )
                             }
-                        },
-                        modifier = Modifier.size(48.dp).testTag("keypad_paste_btn"),
+                            .clickable {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                isDialpadExpanded = false
+                            }
+                            .testTag("keypad_collapse_handle"),
                     ) {
-                        Icon(Icons.Rounded.ContentPaste, contentDescription = "لصق رقم من الحافظة")
-                    }
-
-                    Text(
-                        text = digits.ifBlank { "أدخل الرقم أو ابحث T9..." },
-                        style = if (digits.length > 13) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = if (digits.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("keypad_display_text"),
-                    )
-
-                    Box(
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(CircleShape)
-                            .combinedClickable(
-                                enabled = digits.isNotEmpty(),
-                                onClick = {
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                    digits = digits.dropLast(1)
-                                },
-                                onLongClick = {
-                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                    digits = ""
-                                },
+                        Row(
+                            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .width(36.dp)
+                                    .height(4.dp)
+                                    .clip(RoundedCornerShape(99.dp))
+                                    .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.45f)),
                             )
-                            .testTag("keypad_backspace_btn"),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Rounded.Backspace,
-                            contentDescription = "مسح (اضغط مطولاً للتفريغ)",
-                            tint = if (digits.isNotEmpty()) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
-                        )
+                            Spacer(Modifier.width(8.dp))
+                            Icon(
+                                imageVector = Icons.Rounded.KeyboardArrowDown,
+                                contentDescription = "إخفاء لوحة الأرقام",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "تصغير لوحة الأرقام",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
-                }
-            }
 
-            // Ergonomic Large Tactile Dialpad Matrix
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                keypadMatrix.forEach { row ->
-                    Row(
+                    // Sleek Number Display Bar with Paste & Long-Press-to-Clear Backspace
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        row.forEach { key ->
-                            Surface(
-                                shape = RoundedCornerShape(18.dp),
-                                color = MaterialTheme.colorScheme.surfaceContainerLow,
-                                tonalElevation = 1.dp,
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            IconButton(
+                                onClick = {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val clipText = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+                                    val cleaned = clipText.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
+                                    if (cleaned.isNotBlank()) {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        digits = cleaned
+                                    }
+                                },
+                                modifier = Modifier.size(48.dp).testTag("keypad_paste_btn"),
+                            ) {
+                                Icon(Icons.Rounded.ContentPaste, contentDescription = "لصق رقم من الحافظة")
+                            }
+
+                            Text(
+                                text = digits.ifBlank { "أدخل الرقم أو ابحث T9..." },
+                                style = if (digits.length > 13) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = if (digits.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurface,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(58.dp)
-                                    .clip(RoundedCornerShape(18.dp))
+                                    .testTag("keypad_display_text"),
+                            )
+
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
                                     .combinedClickable(
+                                        enabled = digits.isNotEmpty(),
                                         onClick = {
                                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                            digits += key.digit
+                                            digits = digits.dropLast(1)
                                         },
                                         onLongClick = {
-                                            if (key.digit == "0") {
-                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                digits += "+"
-                                            }
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            digits = ""
                                         },
                                     )
-                                    .testTag("keypad_key_${key.digit}"),
+                                    .testTag("keypad_backspace_btn"),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Column(
-                                    modifier = Modifier.fillMaxSize(),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                    verticalArrangement = Arrangement.Center,
-                                ) {
-                                    Text(
-                                        text = key.digit,
-                                        style = MaterialTheme.typography.headlineSmall,
-                                        fontWeight = FontWeight.SemiBold,
-                                    )
-                                    val sub = buildString {
-                                        if (key.englishLetters.isNotBlank()) append(key.englishLetters)
-                                        if (key.englishLetters.isNotBlank() && key.arabicLetters.isNotBlank()) append(" ")
-                                        if (key.arabicLetters.isNotBlank()) append(key.arabicLetters)
-                                    }
-                                    if (sub.isNotBlank()) {
-                                        Text(
-                                            text = sub,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Clip,
-                                        )
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Backspace,
+                                    contentDescription = "مسح (اضغط مطولاً للتفريغ)",
+                                    tint = if (digits.isNotEmpty()) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
+                                )
+                            }
+                        }
+                    }
+
+                    // Ergonomic Large Tactile Dialpad Matrix
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        keypadMatrix.forEach { row ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                row.forEach { key ->
+                                    Surface(
+                                        shape = RoundedCornerShape(18.dp),
+                                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                        tonalElevation = 1.dp,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(58.dp)
+                                            .clip(RoundedCornerShape(18.dp))
+                                            .combinedClickable(
+                                                onClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    digits += key.digit
+                                                },
+                                                onLongClick = {
+                                                    if (key.digit == "0") {
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        digits += "+"
+                                                    }
+                                                },
+                                            )
+                                            .testTag("keypad_key_${key.digit}"),
+                                    ) {
+                                        Column(
+                                            modifier = Modifier.fillMaxSize(),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center,
+                                        ) {
+                                            Text(
+                                                text = key.digit,
+                                                style = MaterialTheme.typography.headlineSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                            )
+                                            val sub = buildString {
+                                                if (key.englishLetters.isNotBlank()) append(key.englishLetters)
+                                                if (key.englishLetters.isNotBlank() && key.arabicLetters.isNotBlank()) append(" ")
+                                                if (key.arabicLetters.isNotBlank()) append(key.arabicLetters)
+                                            }
+                                            if (sub.isNotBlank()) {
+                                                Text(
+                                                    text = sub,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Clip,
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
+                    // Ergonomic Action Bar: Save | SIM 1 | SIM 2 | WhatsApp | Single Payment Popup
+                    val sim1 = sims.getOrNull(0)
+                    val sim2 = sims.getOrNull(1)
+                    val hasDigits = digits.isNotBlank()
+                    val canSocialOrPay = hasDigits && !PhoneUtils.isUssdOrShortCode(digits)
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        FilledTonalIconButton(
+                            onClick = { if (hasDigits) onSaveNewNumber(digits) },
+                            enabled = hasDigits,
+                            modifier = Modifier.size(48.dp).testTag("keypad_save_btn"),
+                        ) {
+                            Icon(Icons.Rounded.PersonAdd, contentDescription = "حفظ كجهة اتصال")
+                        }
+
+                        Button(
+                            onClick = { placeCallWithSim(digits, sim1?.slotIndex ?: 0) },
+                            enabled = hasDigits,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (preferredSimSlot == 1) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
+                            ),
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier.height(48.dp).testTag("keypad_sim1_btn"),
+                        ) {
+                            Icon(Icons.Rounded.SimCard, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(sim1?.carrierName?.take(10)?.ifBlank { "SIM 1" } ?: "SIM 1", maxLines = 1)
+                        }
+
+                        Button(
+                            onClick = { placeCallWithSim(digits, sim2?.slotIndex ?: 1) },
+                            enabled = hasDigits,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (preferredSimSlot == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+                            ),
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                            modifier = Modifier.height(48.dp).testTag("keypad_sim2_btn"),
+                        ) {
+                            Icon(Icons.Rounded.SimCard, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(sim2?.carrierName?.take(10)?.ifBlank { "SIM 2" } ?: "SIM 2", maxLines = 1)
+                        }
+
+                        FilledTonalIconButton(
+                            onClick = {
+                                if (canSocialOrPay) {
+                                    val dummy = ContactRecord(
+                                        id = "dial_${digits.hashCode()}",
+                                        displayName = digits,
+                                        primaryPhone = digits,
+                                        phones = listOf(digits),
+                                    )
+                                    onWhatsApp(dummy, digits)
+                                }
+                            },
+                            enabled = canSocialOrPay,
+                            modifier = Modifier.size(48.dp).testTag("keypad_wa_btn"),
+                        ) {
+                            Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen)
+                        }
+
+                        FilledTonalButton(
+                            onClick = {
+                                if (canSocialOrPay) {
+                                    paymentTargetPhone = digits
+                                    showPaymentPopup = true
+                                }
+                            },
+                            enabled = canSocialOrPay,
+                            shape = RoundedCornerShape(18.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
+                            modifier = Modifier.height(48.dp).testTag("keypad_pay_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Payments, contentDescription = "دفع سريع", tint = InstaPayPurple, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("دفع", color = InstaPayPurple, maxLines = 1)
+                        }
+                    }
                 }
             }
+        }
 
-            // Ergonomic Action Bar: Save | SIM 1 | SIM 2 | WhatsApp | Single Payment Popup
-            val sim1 = sims.getOrNull(0)
-            val sim2 = sims.getOrNull(1)
-            val hasDigits = digits.isNotBlank()
-            val canSocialOrPay = hasDigits && !PhoneUtils.isUssdOrShortCode(digits)
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                FilledTonalIconButton(
-                    onClick = { if (hasDigits) onSaveNewNumber(digits) },
-                    enabled = hasDigits,
-                    modifier = Modifier.size(48.dp).testTag("keypad_save_btn"),
-                ) {
-                    Icon(Icons.Rounded.PersonAdd, contentDescription = "حفظ كجهة اتصال")
-                }
-
-                Button(
-                    onClick = { placeCallWithSim(digits, sim1?.slotIndex ?: 0) },
-                    enabled = hasDigits,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (preferredSimSlot == 1) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary
-                    ),
-                    shape = RoundedCornerShape(18.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                    modifier = Modifier.height(48.dp).testTag("keypad_sim1_btn"),
-                ) {
-                    Icon(Icons.Rounded.SimCard, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(sim1?.carrierName?.take(10)?.ifBlank { "SIM 1" } ?: "SIM 1", maxLines = 1)
-                }
-
-                Button(
-                    onClick = { placeCallWithSim(digits, sim2?.slotIndex ?: 1) },
-                    enabled = hasDigits,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (preferredSimSlot == 1) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
-                    ),
-                    shape = RoundedCornerShape(18.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-                    modifier = Modifier.height(48.dp).testTag("keypad_sim2_btn"),
-                ) {
-                    Icon(Icons.Rounded.SimCard, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(sim2?.carrierName?.take(10)?.ifBlank { "SIM 2" } ?: "SIM 2", maxLines = 1)
-                }
-
-                FilledTonalIconButton(
-                    onClick = {
-                        if (canSocialOrPay) {
-                            val dummy = ContactRecord(
-                                id = "dial_${digits.hashCode()}",
-                                displayName = digits,
-                                primaryPhone = digits,
-                                phones = listOf(digits),
-                            )
-                            onWhatsApp(dummy, digits)
-                        }
-                    },
-                    enabled = canSocialOrPay,
-                    modifier = Modifier.size(48.dp).testTag("keypad_wa_btn"),
-                ) {
-                    Icon(Icons.AutoMirrored.Rounded.Chat, contentDescription = "واتساب", tint = WhatsAppGreen)
-                }
-
-                FilledTonalButton(
-                    onClick = {
-                        if (canSocialOrPay) {
-                            paymentTargetPhone = digits
-                            showPaymentPopup = true
-                        }
-                    },
-                    enabled = canSocialOrPay,
-                    shape = RoundedCornerShape(18.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                    modifier = Modifier.height(48.dp).testTag("keypad_pay_btn"),
-                ) {
-                    Icon(Icons.Rounded.Payments, contentDescription = "دفع سريع", tint = InstaPayPurple, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("دفع", color = InstaPayPurple, maxLines = 1)
-                }
-            }
+        // Floating Expand Pill when Dialpad is collapsed
+        AnimatedVisibility(
+            visible = !isDialpadExpanded,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 18.dp, bottom = 16.dp),
+        ) {
+            ExtendedFloatingActionButton(
+                onClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    isDialpadExpanded = true
+                },
+                icon = { Icon(Icons.Rounded.Dialpad, contentDescription = "إظهار لوحة الأرقام") },
+                text = {
+                    Text(
+                        text = if (digits.isBlank()) "إظهار الكيباد" else "الكيباد ($digits)",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                modifier = Modifier.testTag("keypad_expand_pill"),
+            )
         }
     }
 

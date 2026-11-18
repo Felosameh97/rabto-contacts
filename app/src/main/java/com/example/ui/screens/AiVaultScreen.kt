@@ -28,6 +28,8 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
+import androidx.compose.material.icons.rounded.Checklist
+import androidx.compose.material.icons.rounded.CleaningServices
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -35,6 +37,8 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NoteAdd
+import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
@@ -71,12 +75,18 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.local.LocalMediaCacheManager
+import com.example.domain.model.CallActionItem
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.LocalMediaCacheStats
+import com.example.domain.model.PaymentTemplate
 import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
 import com.example.ui.components.InteractiveTranscriptPlayer
+import com.example.ui.components.UnsavedNumberPaymentPopup
+import com.example.ui.theme.InstaPayPurple
+import com.example.util.PhoneUtils
 import com.example.util.SystemIntents
+import com.example.util.VaultActionHelper
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -84,6 +94,7 @@ import java.util.Locale
 
 private enum class VaultFilter(val labelAr: String) {
     ALL("الكل"),
+    TASKS("المهام المفتوحة"),
     READY("ملخصات جاهزة"),
     PENDING("قيد التفريغ"),
     HAS_ACTIONS("بها مهام"),
@@ -94,13 +105,16 @@ fun AiVaultScreen(
     transcripts: List<CallTranscriptRecord>,
     rawRecordings: List<CallRecordingItem>,
     cacheStats: LocalMediaCacheStats,
+    paymentTemplates: List<PaymentTemplate> = emptyList(),
     onToggleActionItem: (String, String) -> Unit,
     onSaveCallNotes: (CallTranscriptRecord) -> Unit,
     onMarkCalendarAdded: (String) -> Unit,
+    onScheduleActionReminder: (CallTranscriptRecord, CallActionItem) -> Unit = { _, _ -> },
     onAnalyzeTranscript: (CallTranscriptRecord) -> Unit,
     onDeleteTranscript: (String) -> Unit,
     onTranscribeRawRecording: (CallRecordingItem) -> Unit,
     onDeleteRawRecording: (CallRecordingItem) -> Unit,
+    onPurgeOrphanedCache: () -> Unit = {},
     onRefreshVault: () -> Unit,
     onOpenLiveTranscriber: () -> Unit,
     onOpenAiAssistant: () -> Unit,
@@ -111,6 +125,7 @@ fun AiVaultScreen(
     var activePlayerRecordId by remember { mutableStateOf<String?>(null) }
     var playingRawPath by remember { mutableStateOf<String?>(null) }
     var rawMediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var paymentTargetPhone by remember { mutableStateOf<String?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -153,11 +168,29 @@ fun AiVaultScreen(
         )
     }
 
+    val openTasksAll = remember(transcripts) {
+        VaultActionHelper.extractOpenActionItems(transcripts)
+    }
+
+    val filteredOpenTasks = remember(openTasksAll, searchQuery) {
+        val q = searchQuery.trim().lowercase(Locale.getDefault())
+        if (q.isEmpty()) {
+            openTasksAll
+        } else {
+            openTasksAll.filter { task ->
+                task.actionItem.title.lowercase(Locale.getDefault()).contains(q) ||
+                    task.record.contactName.lowercase(Locale.getDefault()).contains(q) ||
+                    task.record.phone.contains(q)
+            }
+        }
+    }
+
     val filteredTranscripts = remember(transcripts, searchQuery, activeFilter) {
         val q = searchQuery.trim().lowercase(Locale.getDefault())
         transcripts.filter { rec ->
             val filterMatch = when (activeFilter) {
                 VaultFilter.ALL -> true
+                VaultFilter.TASKS -> false
                 VaultFilter.READY -> rec.status == "READY"
                 VaultFilter.PENDING -> rec.status != "READY"
                 VaultFilter.HAS_ACTIONS -> rec.actionItems.any { !it.completed }
@@ -181,6 +214,28 @@ fun AiVaultScreen(
     }
 
     val fmt = remember { SimpleDateFormat("dd/MM/yyyy • hh:mm a", Locale.getDefault()) }
+
+    fun executeSmartAction(record: CallTranscriptRecord, item: CallActionItem, kind: String) {
+        when (kind) {
+            "CALENDAR" -> {
+                SystemIntents.insertCalendarEvent(
+                    context = context,
+                    title = item.title.ifBlank { record.suggestedEventTitle.ifBlank { "متابعة مكالمة" } },
+                    description = "${record.contactName} (${record.phone})\n${record.oneLineSummary}",
+                    startEpochMs = item.dueEpochMs ?: record.suggestedEventEpochMs,
+                )
+                onMarkCalendarAdded(record.id)
+            }
+            "PAYMENT" -> {
+                if (record.phone.isNotBlank() && !PhoneUtils.isUssdOrShortCode(record.phone)) {
+                    paymentTargetPhone = record.phone
+                } else {
+                    onScheduleActionReminder(record, item)
+                }
+            }
+            else -> onScheduleActionReminder(record, item)
+        }
+    }
 
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -212,6 +267,7 @@ fun AiVaultScreen(
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f),
                             ) {
                                 Icon(Icons.Rounded.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                                 Column {
@@ -220,8 +276,8 @@ fun AiVaultScreen(
                                         style = MaterialTheme.typography.titleMedium,
                                         fontWeight = FontWeight.Bold,
                                     )
-                                    val sizeLabel = formatBytesReadable(cacheStats.totalBytes)
-                                    val openActions = transcripts.sumOf { tr -> tr.actionItems.count { !it.completed } }
+                                    val sizeLabel = VaultActionHelper.formatBytesReadable(cacheStats.totalBytes)
+                                    val openActions = openTasksAll.size
                                     Text(
                                         text = buildString {
                                             append("${transcripts.size} تفريغ • ${cacheStats.recordingFilesCount} تسجيل ($sizeLabel)")
@@ -232,11 +288,21 @@ fun AiVaultScreen(
                                     )
                                 }
                             }
-                            IconButton(
-                                onClick = onRefreshVault,
-                                modifier = Modifier.size(48.dp).testTag("ai_vault_refresh_btn"),
-                            ) {
-                                Icon(Icons.Rounded.Refresh, contentDescription = "تحديث الخزنة")
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (cacheStats.recordingFilesCount > 0 || unlinkedRecordings.isNotEmpty()) {
+                                    IconButton(
+                                        onClick = onPurgeOrphanedCache,
+                                        modifier = Modifier.size(48.dp).testTag("ai_vault_purge_cache_btn"),
+                                    ) {
+                                        Icon(Icons.Rounded.CleaningServices, contentDescription = "تنظيف كاش الصوت اليتيم")
+                                    }
+                                }
+                                IconButton(
+                                    onClick = onRefreshVault,
+                                    modifier = Modifier.size(48.dp).testTag("ai_vault_refresh_btn"),
+                                ) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = "تحديث الخزنة")
+                                }
                             }
                         }
                         Row(
@@ -290,10 +356,18 @@ fun AiVaultScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         VaultFilter.entries.forEach { filter ->
+                            val chipLabel = if (filter == VaultFilter.TASKS) {
+                                "${filter.labelAr} (${openTasksAll.size})"
+                            } else {
+                                filter.labelAr
+                            }
                             FilterChip(
                                 selected = activeFilter == filter,
                                 onClick = { activeFilter = filter },
-                                label = { Text(filter.labelAr, maxLines = 1) },
+                                leadingIcon = if (filter == VaultFilter.TASKS) {
+                                    { Icon(Icons.Rounded.Checklist, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                                } else null,
+                                label = { Text(chipLabel, maxLines = 1) },
                                 modifier = Modifier.testTag("ai_vault_filter_${filter.name}"),
                             )
                         }
@@ -301,7 +375,50 @@ fun AiVaultScreen(
                 }
             }
 
-            if (filteredTranscripts.isEmpty() && unlinkedRecordings.isEmpty()) {
+            if (activeFilter == VaultFilter.TASKS) {
+                if (filteredOpenTasks.isEmpty()) {
+                    item {
+                        Surface(
+                            shape = RoundedCornerShape(20.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_vault_tasks_empty"),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(28.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Checklist,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.65f),
+                                    modifier = Modifier.size(38.dp),
+                                )
+                                Text("لا توجد مهام متابعة مفتوحة حالياً", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    text = "المواعيد والالتزامات والمدفوعات المستخرجة من مكالماتك تظهر هنا لتنفيذها بضغطة واحدة.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    items(
+                        items = filteredOpenTasks,
+                        key = { "${it.record.id}_${it.actionItem.id}" },
+                    ) { task ->
+                        OpenTaskHubCard(
+                            record = task.record,
+                            item = task.actionItem,
+                            kind = task.resolvedKind,
+                            formattedCallDate = fmt.format(Date(task.record.timestampMs.takeIf { it > 0L } ?: task.record.updatedAtEpochMs)),
+                            onToggleComplete = { onToggleActionItem(task.record.id, task.actionItem.id) },
+                            onExecute = { executeSmartAction(task.record, task.actionItem, task.resolvedKind) },
+                        )
+                    }
+                }
+            } else if (filteredTranscripts.isEmpty() && unlinkedRecordings.isEmpty()) {
                 item {
                     Surface(
                         shape = RoundedCornerShape(20.dp),
@@ -347,6 +464,7 @@ fun AiVaultScreen(
                         },
                         formattedDate = fmt.format(Date(record.timestampMs.takeIf { it > 0L } ?: record.updatedAtEpochMs)),
                         onToggleActionItem = { itemId -> onToggleActionItem(record.id, itemId) },
+                        onExecuteActionItem = { item, kind -> executeSmartAction(record, item, kind) },
                         onSaveNotes = { onSaveCallNotes(record) },
                         onMarkCalendarAdded = { onMarkCalendarAdded(record.id) },
                         onAnalyze = { onAnalyzeTranscript(record) },
@@ -410,6 +528,95 @@ fun AiVaultScreen(
             }
         }
     }
+
+    paymentTargetPhone?.let { targetPhone ->
+        UnsavedNumberPaymentPopup(
+            phone = targetPhone,
+            paymentTemplates = paymentTemplates,
+            onDismiss = { paymentTargetPhone = null },
+        )
+    }
+}
+
+@Composable
+private fun OpenTaskHubCard(
+    record: CallTranscriptRecord,
+    item: CallActionItem,
+    kind: String,
+    formattedCallDate: String,
+    onToggleComplete: () -> Unit,
+    onExecute: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("vault_hub_task_${record.id}_${item.id}"),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            IconButton(
+                onClick = onToggleComplete,
+                modifier = Modifier.size(48.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.CheckBoxOutlineBlank,
+                    contentDescription = "تحديد كمكتمل",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = buildString {
+                        append(record.contactName.ifBlank { record.phone.ifBlank { "مكالمة" } })
+                        if (item.dueDateIso.isNotBlank()) append(" • ${item.dueDateIso}")
+                        else append(" • $formattedCallDate")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            SmartActionExecuteButton(
+                kind = kind,
+                hasPhone = record.phone.isNotBlank() && !PhoneUtils.isUssdOrShortCode(record.phone),
+                onExecute = onExecute,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SmartActionExecuteButton(
+    kind: String,
+    hasPhone: Boolean,
+    onExecute: () -> Unit,
+) {
+    val (label, icon, tintColor) = when {
+        kind == "CALENDAR" -> Triple("للتقويم", Icons.Rounded.CalendarMonth, MaterialTheme.colorScheme.primary)
+        kind == "PAYMENT" && hasPhone -> Triple("دفع", Icons.Rounded.Payments, InstaPayPurple)
+        else -> Triple("تذكير", Icons.Rounded.NotificationsActive, MaterialTheme.colorScheme.secondary)
+    }
+    FilledTonalButton(
+        onClick = onExecute,
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+    ) {
+        Icon(icon, contentDescription = null, tint = tintColor, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(4.dp))
+        Text(label, style = MaterialTheme.typography.labelMedium, color = tintColor, maxLines = 1)
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -421,6 +628,7 @@ private fun VaultTranscriptCard(
     onRequestPlayerFocus: () -> Unit,
     formattedDate: String,
     onToggleActionItem: (String) -> Unit,
+    onExecuteActionItem: (CallActionItem, String) -> Unit,
     onSaveNotes: () -> Unit,
     onMarkCalendarAdded: () -> Unit,
     onAnalyze: () -> Unit,
@@ -510,7 +718,7 @@ private fun VaultTranscriptCard(
                 }
             }
 
-            // Interactive Action Items
+            // Interactive Action Items with 1-Tap Execution
             if (record.actionItems.isNotEmpty()) {
                 HorizontalDivider()
                 Text(
@@ -518,13 +726,14 @@ private fun VaultTranscriptCard(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     record.actionItems.forEach { item ->
+                        val resolvedKind = VaultActionHelper.inferActionKind(item)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable { onToggleActionItem(item.id) }
-                                .padding(vertical = 4.dp)
+                                .padding(vertical = 2.dp)
                                 .testTag("vault_action_${record.id}_${item.id}"),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -543,6 +752,13 @@ private fun VaultTranscriptCard(
                                 color = if (item.completed) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.weight(1f),
                             )
+                            if (!item.completed) {
+                                SmartActionExecuteButton(
+                                    kind = resolvedKind,
+                                    hasPhone = record.phone.isNotBlank() && !PhoneUtils.isUssdOrShortCode(record.phone),
+                                    onExecute = { onExecuteActionItem(item, resolvedKind) },
+                                )
+                            }
                         }
                     }
                 }
@@ -619,15 +835,5 @@ private fun VaultTranscriptCard(
                 }
             }
         }
-    }
-}
-
-private fun formatBytesReadable(bytes: Long): String {
-    if (bytes <= 0L) return "0 KB"
-    val kb = bytes / 1024.0
-    return if (kb < 1024.0) {
-        String.format(Locale.US, "%.0f KB", kb.coerceAtLeast(1.0))
-    } else {
-        String.format(Locale.US, "%.1f MB", kb / 1024.0)
     }
 }

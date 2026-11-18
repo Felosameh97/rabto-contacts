@@ -22,6 +22,7 @@ import com.example.data.remote.FirestoreContactsRepository
 import com.example.data.remote.GitHubUpdateService
 import com.example.data.remote.GoogleDriveScanner
 import com.example.data.sync.OfflineFirstSyncEngine
+import com.example.domain.model.CallActionItem
 import com.example.domain.model.CallLogEntry
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.CategoryNode
@@ -586,6 +587,46 @@ class RabtaViewModel(
             _cacheStats.value = LocalMediaCacheManager.computeCacheStats(appContext)
         }
         _statusMessage.value = "تم حذف التسجيل"
+    }
+
+    fun purgeOrphanedMediaCache() {
+        viewModelScope.launch {
+            val removed = withContext(Dispatchers.IO) {
+                val allTranscripts = transcriptDao.observeAll().firstOrNull().orEmpty()
+                val referenced = buildSet {
+                    allTranscripts.forEach { entity ->
+                        if (entity.audioFilePath.isNotBlank()) add(entity.audioFilePath)
+                        if (entity.audioFileName.isNotBlank()) add(entity.audioFileName)
+                    }
+                }
+                val purged = LocalMediaCacheManager.purgeOrphanedAudioFiles(appContext, referenced)
+                _callRecordings.value = CallRecorderManager.listRecordings(appContext)
+                _cacheStats.value = LocalMediaCacheManager.computeCacheStats(appContext)
+                purged
+            }
+            _statusMessage.value = if (removed > 0) {
+                "تم تنظيف $removed ملف صوتي غير مرتبط من الكاش"
+            } else {
+                "الكاش المحلي نظيف بالفعل (كل التسجيلات مرتبطة بتفريغاتها)"
+            }
+        }
+    }
+
+    fun scheduleActionItemReminder(record: CallTranscriptRecord, item: CallActionItem) {
+        val now = System.currentTimeMillis()
+        val dueMs = item.dueEpochMs
+        val delayMinutes = if (dueMs != null && dueMs > now + 60_000L) {
+            ((dueMs - now) / 60_000L).toInt().coerceAtLeast(1)
+        } else {
+            null // Tomorrow 10:00 AM smart default
+        }
+        scheduleFollowUpReminder(
+            contactName = record.contactName.ifBlank { record.phone },
+            phone = record.phone,
+            contactId = record.contactId,
+            delayMinutes = delayMinutes,
+            note = item.title,
+        )
     }
 
     fun updateContactPhoto(contact: ContactRecord, photoPath: String?) {
