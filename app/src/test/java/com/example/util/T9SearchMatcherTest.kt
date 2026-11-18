@@ -69,4 +69,34 @@ class T9SearchMatcherTest {
         assertEquals("78", initialsForName("", "01012345678"))
         assertEquals("#", initialsForName("", ""))
     }
+
+    @Test
+    fun t9_323_matchesDadEnglishArabicNicknameAndTags() {
+        val dadContact = ContactRecord(
+            id = "dad_en",
+            displayName = "Dad",
+            primaryPhone = "01099998888",
+            phones = listOf("01099998888"),
+        )
+        val dadArabicNickname = ContactRecord(
+            id = "dad_ar",
+            displayName = "أبو سارة",
+            nickname = "دادي",
+            primaryPhone = "01077776666",
+            phones = listOf("01077776666"),
+        )
+        val taggedContact = ContactRecord(
+            id = "dad_tag",
+            displayName = "Samir Mansour",
+            tags = listOf("dad"),
+            primaryPhone = "01044443333",
+            phones = listOf("01044443333"),
+        )
+
+        val hits = T9SearchMatcher.filterAndRank("323", contacts + listOf(dadContact, dadArabicNickname, taggedContact))
+        val hitIds = hits.map { it.id }.toSet()
+        assertTrue(hitIds.contains("dad_en"))
+        assertTrue(hitIds.contains("dad_ar"))
+        assertTrue(hitIds.contains("dad_tag"))
+    }
 }

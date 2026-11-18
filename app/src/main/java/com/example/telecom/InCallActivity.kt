@@ -3,16 +3,20 @@ package com.example.telecom
 import android.Manifest
 import android.app.KeyguardManager
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.telecom.Call
+import android.telecom.CallAudioState
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,39 +26,60 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.AddIcCall
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BluetoothAudio
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.CallEnd
+import androidx.compose.material.icons.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Dialpad
 import androidx.compose.material.icons.rounded.FiberManualRecord
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Headset
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.Pause
+import androidx.compose.material.icons.rounded.PhoneInTalk
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.SwapCalls
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,7 +102,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.MainActivity
+import com.example.data.local.RabtaDatabase
 import com.example.data.local.SyncPrefsDataStore
+import com.example.domain.model.ContactRecord
+import com.example.ui.components.ContactAvatarBadge
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.RabtaContactsTheme
@@ -85,6 +113,11 @@ import com.example.ui.theme.ThemeMode
 import com.example.ui.theme.WhatsAppGreen
 import com.example.util.AppLockSecurity
 import com.example.util.PhoneUtils
+import com.example.util.SystemIntents
+import com.example.util.T9SearchMatcher
+import com.example.util.rememberDialpadTonePlayer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class InCallActivity : ComponentActivity() {
@@ -114,14 +147,6 @@ class InCallActivity : ComponentActivity() {
                         runCatching { startActivity(homeIntent) }
                         moveTaskToBack(false)
                     },
-                    onAddCall = {
-                        val dialIntent = Intent(this, MainActivity::class.java).apply {
-                            action = Intent.ACTION_DIAL
-                            data = Uri.parse("tel:")
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                        }
-                        runCatching { startActivity(dialIntent) }
-                    },
                     onFinish = { finish() },
                 )
             }
@@ -129,18 +154,21 @@ class InCallActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun InCallScreen(
     usePhotoBackground: Boolean,
     hideLockscreenDetailsPref: Boolean,
     busyReplyMessage: String,
     onMinimize: () -> Unit,
-    onAddCall: () -> Unit,
     onFinish: () -> Unit,
 ) {
     val context = LocalContext.current
     val state by RabtaInCallService.uiState.collectAsStateWithLifecycle()
+    val tonePlayer = rememberDialpadTonePlayer()
     var showKeypad by remember { mutableStateOf(false) }
+    var showAudioRouteMenu by remember { mutableStateOf(false) }
+    var showAddCallPicker by remember { mutableStateOf(false) }
 
     val keyguardLocked = remember(state.callState, state.hasActiveCall) {
         runCatching {
@@ -170,10 +198,13 @@ private fun InCallScreen(
         }
     }
 
-    val rawDisplayName = state.matchedContact?.displayName?.ifBlank { state.phoneNumber } ?: state.phoneNumber.ifBlank { "مكالمة" }
+    val rawDisplayName = when {
+        state.isConferenceCall -> "مكالمة جماعية (${state.conferenceParticipants.size.coerceAtLeast(2)})"
+        else -> state.matchedContact?.displayName?.ifBlank { state.phoneNumber } ?: state.phoneNumber.ifBlank { "مكالمة" }
+    }
     val displayName = if (maskCallerForPrivacy) "مكالمة واردة — مخفية للخصوصية" else rawDisplayName
     val photoPath = if (maskCallerForPrivacy) null else state.matchedContact?.photoUri?.takeIf { it.isNotBlank() && File(it).exists() }
-    val showBgPhoto = usePhotoBackground && photoPath != null && !maskCallerForPrivacy
+    val showBgPhoto = usePhotoBackground && photoPath != null && !maskCallerForPrivacy && !state.isConferenceCall
     val statusText = when (state.callState) {
         Call.STATE_RINGING -> "مكالمة واردة..."
         Call.STATE_DIALING, Call.STATE_CONNECTING -> "جاري الاتصال..."
@@ -184,6 +215,20 @@ private fun InCallScreen(
 
     val primaryTextColor = if (showBgPhoto) Color.White else MaterialTheme.colorScheme.onSurface
     val secondaryTextColor = if (showBgPhoto) Color.White.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onSurfaceVariant
+
+    val audioRouteLabel = when (state.activeAudioRoute) {
+        CallAudioState.ROUTE_BLUETOOTH -> "بلوتوث"
+        CallAudioState.ROUTE_SPEAKER -> "سبيكر"
+        CallAudioState.ROUTE_WIRED_HEADSET -> "سماعة"
+        else -> "سماعة الأذن"
+    }
+    val audioRouteIcon = when (state.activeAudioRoute) {
+        CallAudioState.ROUTE_BLUETOOTH -> Icons.Rounded.BluetoothAudio
+        CallAudioState.ROUTE_WIRED_HEADSET -> Icons.Rounded.Headset
+        CallAudioState.ROUTE_SPEAKER -> Icons.Rounded.VolumeUp
+        else -> Icons.Rounded.PhoneInTalk
+    }
+    val hasExtraAudioRoutes = ((state.supportedAudioMask and (CallAudioState.ROUTE_BLUETOOTH or CallAudioState.ROUTE_WIRED_HEADSET)) != 0)
 
     Scaffold { innerPadding ->
         Box(modifier = Modifier.fillMaxSize()) {
@@ -217,7 +262,7 @@ private fun InCallScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween,
             ) {
-                // Top Bar: Minimize Floating Bubble + Lockscreen Privacy Badge
+                // Top Bar: Minimize Floating Bubble + Lockscreen Privacy Badge + Recording Pill
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -269,14 +314,15 @@ private fun InCallScreen(
                     }
                 }
 
-                // Caller Info + Pre-Call Context + Waveform Visualizer
+                // Caller Info + Secondary Call / Conference Panel + Pre-Call Context + Waveform Visualizer
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(88.dp)
+                            .size(84.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.primaryContainer),
                         contentAlignment = Alignment.Center,
@@ -287,6 +333,13 @@ private fun InCallScreen(
                                 contentDescription = "مخفي للخصوصية",
                                 tint = MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.size(34.dp),
+                            )
+                        } else if (state.isConferenceCall) {
+                            Icon(
+                                imageVector = Icons.Rounded.Groups,
+                                contentDescription = "مكالمة جماعية",
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(38.dp),
                             )
                         } else if (photoPath != null) {
                             AsyncImage(
@@ -314,7 +367,7 @@ private fun InCallScreen(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!maskCallerForPrivacy && state.phoneNumber.isNotBlank() && state.phoneNumber != displayName) {
+                    if (!maskCallerForPrivacy && !state.isConferenceCall && state.phoneNumber.isNotBlank() && state.phoneNumber != displayName) {
                         Text(
                             text = state.phoneNumber,
                             style = MaterialTheme.typography.titleMedium,
@@ -328,7 +381,153 @@ private fun InCallScreen(
                         fontWeight = FontWeight.SemiBold,
                     )
 
-                    if (!maskCallerForPrivacy) {
+                    // Multi-Call / Secondary Call Banner (Swap, Merge, Answer Waiting, End)
+                    if (!maskCallerForPrivacy && state.secondaryCall != null) {
+                        val sec = state.secondaryCall!!
+                        val secStatus = when (sec.callState) {
+                            Call.STATE_RINGING -> "مكالمة ثانية واردة"
+                            Call.STATE_HOLDING -> "معلق"
+                            Call.STATE_DIALING, Call.STATE_CONNECTING -> "جاري الاتصال..."
+                            Call.STATE_ACTIVE -> "نشط"
+                            else -> "متصل"
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.92f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("incall_secondary_call_banner"),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = sec.displayName,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = "${sec.phoneNumber} • $secStatus",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { RabtaInCallService.disconnectCallById(sec.callId) },
+                                        modifier = Modifier.size(40.dp).testTag("incall_end_secondary_btn"),
+                                    ) {
+                                        Icon(Icons.Rounded.CallEnd, contentDescription = "إنهاء المكالمة الثانية", tint = ErrorRed)
+                                    }
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    if (sec.callState == Call.STATE_RINGING) {
+                                        Button(
+                                            onClick = { RabtaInCallService.answerCall() },
+                                            colors = ButtonDefaults.buttonColors(containerColor = WhatsAppGreen),
+                                            modifier = Modifier.weight(1f).testTag("incall_answer_waiting_btn"),
+                                        ) {
+                                            Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text("رد وتعليق الحالي", maxLines = 1)
+                                        }
+                                    } else {
+                                        if (state.canSwapCalls) {
+                                            OutlinedButton(
+                                                onClick = { RabtaInCallService.swapCalls() },
+                                                modifier = Modifier.weight(1f).testTag("incall_swap_calls_btn"),
+                                            ) {
+                                                Icon(Icons.Rounded.SwapCalls, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("تبديل", maxLines = 1)
+                                            }
+                                        }
+                                        if (state.canMergeConference) {
+                                            Button(
+                                                onClick = { RabtaInCallService.mergeConference() },
+                                                modifier = Modifier.weight(1f).testTag("incall_merge_conference_btn"),
+                                            ) {
+                                                Icon(Icons.Rounded.CallMerge, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("دمج جماعية", maxLines = 1)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Conference Participants Card (Split / Disconnect each)
+                    if (!maskCallerForPrivacy && state.isConferenceCall && state.conferenceParticipants.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerLow.copy(alpha = 0.92f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("incall_conference_participants"),
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Text(
+                                    text = "أعضاء المكالمة الجماعية",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                                state.conferenceParticipants.take(4).forEach { member ->
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Text(
+                                            text = "${member.displayName} (${member.phoneNumber})",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        if (member.canSeparate) {
+                                            IconButton(
+                                                onClick = { RabtaInCallService.splitConferenceParticipant(member.callId) },
+                                                modifier = Modifier.size(36.dp),
+                                            ) {
+                                                Icon(
+                                                    Icons.AutoMirrored.Rounded.CallSplit,
+                                                    contentDescription = "فصل من الجماعية",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                )
+                                            }
+                                        }
+                                        if (member.canDisconnect) {
+                                            IconButton(
+                                                onClick = { RabtaInCallService.disconnectCallById(member.callId) },
+                                                modifier = Modifier.size(36.dp),
+                                            ) {
+                                                Icon(Icons.Rounded.CallEnd, contentDescription = "إنهاء العضو", tint = ErrorRed)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!maskCallerForPrivacy && !state.isConferenceCall) {
                         val categoryOrDistrict = listOfNotNull(
                             state.matchedContact?.categoryPaths?.firstOrNull(),
                             state.matchedContact?.district,
@@ -338,7 +537,6 @@ private fun InCallScreen(
                             AssistChip(onClick = {}, label = { Text(categoryOrDistrict) })
                         }
 
-                        // Pre-Call Context Banner ("Last spoke • 1-line AI summary")
                         state.preCallContext?.let { pre ->
                             val lastSpoke = pre.lastSpokeEpochMs?.let { AppLockSecurity.formatRelativeTimeAr(it) }
                             val headline = buildString {
@@ -413,7 +611,7 @@ private fun InCallScreen(
                         }
                     }
 
-                    if (state.isLiveTranscribing || state.liveTranscriptText.isNotBlank()) {
+                    AnimatedVisibility(visible = state.isLiveTranscribing || state.liveTranscriptText.isNotBlank()) {
                         Surface(
                             shape = RoundedCornerShape(16.dp),
                             color = Color.Black.copy(alpha = 0.45f),
@@ -442,7 +640,10 @@ private fun InCallScreen(
                             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                                 row.forEach { ch ->
                                     FilledTonalIconButton(
-                                        onClick = { RabtaInCallService.sendDtmf(ch) },
+                                        onClick = {
+                                            tonePlayer.play(ch)
+                                            RabtaInCallService.sendDtmf(ch)
+                                        },
                                         modifier = Modifier.size(56.dp),
                                     ) {
                                         Text(ch.toString(), style = MaterialTheme.typography.titleLarge)
@@ -506,13 +707,54 @@ private fun InCallScreen(
                             labelColor = primaryTextColor,
                             onClick = { RabtaInCallService.toggleMute() },
                         )
-                        CallActionToggle(
-                            icon = Icons.Rounded.VolumeUp,
-                            label = "سبيكر",
-                            active = state.isSpeaker,
-                            labelColor = primaryTextColor,
-                            onClick = { RabtaInCallService.toggleSpeaker() },
-                        )
+
+                        Box {
+                            CallActionToggle(
+                                icon = audioRouteIcon,
+                                label = audioRouteLabel,
+                                active = state.activeAudioRoute != CallAudioState.ROUTE_EARPIECE,
+                                labelColor = primaryTextColor,
+                                onClick = {
+                                    if (hasExtraAudioRoutes) {
+                                        showAudioRouteMenu = true
+                                    } else {
+                                        RabtaInCallService.toggleSpeaker()
+                                    }
+                                },
+                                onLongClick = { showAudioRouteMenu = true },
+                            )
+                            DropdownMenu(
+                                expanded = showAudioRouteMenu,
+                                onDismissRequest = { showAudioRouteMenu = false },
+                            ) {
+                                val routes = listOf(
+                                    CallAudioState.ROUTE_EARPIECE to "سماعة الأذن",
+                                    CallAudioState.ROUTE_SPEAKER to "مكبر الصوت (سبيكر)",
+                                    CallAudioState.ROUTE_BLUETOOTH to "بلوتوث",
+                                    CallAudioState.ROUTE_WIRED_HEADSET to "سماعة سلكية",
+                                ).filter { (routeMask, _) ->
+                                    routeMask == CallAudioState.ROUTE_SPEAKER ||
+                                        routeMask == CallAudioState.ROUTE_EARPIECE ||
+                                        (state.supportedAudioMask and routeMask) != 0
+                                }
+                                routes.forEach { (routeMask, title) ->
+                                    val selected = state.activeAudioRoute == routeMask
+                                    DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = if (selected) "✓ $title" else title,
+                                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                            )
+                                        },
+                                        onClick = {
+                                            showAudioRouteMenu = false
+                                            RabtaInCallService.selectAudioRoute(routeMask)
+                                        },
+                                    )
+                                }
+                            }
+                        }
+
                         CallActionToggle(
                             icon = if (state.isOnHold) Icons.Rounded.PlayArrow else Icons.Rounded.Pause,
                             label = if (state.isOnHold) "استئناف" else "انتظار",
@@ -530,9 +772,9 @@ private fun InCallScreen(
                         CallActionToggle(
                             icon = Icons.Rounded.AddIcCall,
                             label = "إضافة",
-                            active = false,
+                            active = showAddCallPicker,
                             labelColor = primaryTextColor,
-                            onClick = onAddCall,
+                            onClick = { showAddCallPicker = true },
                         )
                         CallActionToggle(
                             icon = Icons.Rounded.RecordVoiceOver,
@@ -627,6 +869,154 @@ private fun InCallScreen(
             }
         }
     }
+
+    if (showAddCallPicker) {
+        AddCallConferenceSheet(
+            onDismiss = { showAddCallPicker = false },
+            onDialNumber = { targetPhone ->
+                showAddCallPicker = false
+                SystemIntents.dialPhone(context, targetPhone)
+            },
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddCallConferenceSheet(
+    onDismiss: () -> Unit,
+    onDialNumber: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var query by remember { mutableStateOf("") }
+    var contacts by remember { mutableStateOf<List<ContactRecord>>(emptyList()) }
+
+    LaunchedEffect(Unit) {
+        contacts = withContext(Dispatchers.IO) {
+            runCatching {
+                RabtaDatabase.getInstance(context)
+                    .contactDao()
+                    .getRecentOrAllPage(limit = 400, offset = 0)
+                    .map { it.toDomain() }
+            }.getOrDefault(emptyList())
+        }
+    }
+
+    val filtered = remember(query, contacts) {
+        if (query.isBlank()) contacts.take(30)
+        else T9SearchMatcher.filterAndRank(query, contacts, limit = 30)
+    }
+
+    val directDialPhone = remember(query) {
+        query.filter { it.isDigit() || it in setOf('+', '*', '#') }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = "إضافة مكالمة / مكالمة جماعية (Conference)",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+                placeholder = { Text("ابحث بالاسم أو اكتب الرقم...") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("incall_add_call_search"),
+            )
+
+            if (directDialPhone.length >= 3) {
+                Button(
+                    onClick = { onDialNumber(directDialPhone) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("incall_add_call_direct_btn"),
+                ) {
+                    Icon(Icons.Rounded.Call, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("اتصال بالرقم: $directDialPhone")
+                }
+            }
+
+            HorizontalDivider()
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 180.dp, max = 380.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(filtered, key = { it.id }) { contact ->
+                    val phone = contact.primaryPhone.ifBlank { contact.phones.firstOrNull().orEmpty() }
+                    if (phone.isBlank()) return@items
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerLow,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onDialNumber(phone) },
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            ContactAvatarBadge(
+                                displayName = contact.displayName,
+                                phone = phone,
+                                photoUri = contact.photoUri,
+                                colorSeed = contact.avatarColorSeed,
+                                showPhoto = true,
+                                size = 40.dp,
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = contact.displayName,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = phone,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            IconButton(
+                                onClick = { onDialNumber(phone) },
+                                modifier = Modifier.size(48.dp),
+                            ) {
+                                Icon(Icons.Rounded.Call, contentDescription = "اتصال", tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                }
+            }
+
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.End),
+            ) {
+                Text("إغلاق")
+            }
+        }
+    }
 }
 
 @Composable
@@ -654,6 +1044,7 @@ private fun LiveWaveformRow(amplitude: Int) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CallActionToggle(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -662,22 +1053,33 @@ private fun CallActionToggle(
     activeColor: Color? = null,
     labelColor: Color = MaterialTheme.colorScheme.onSurface,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        FilledTonalIconButton(
-            onClick = onClick,
-            colors = if (active) {
-                IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = (activeColor ?: MaterialTheme.colorScheme.primary).copy(alpha = 0.28f),
-                    contentColor = activeColor ?: MaterialTheme.colorScheme.primary,
-                )
+        Surface(
+            shape = CircleShape,
+            color = if (active) {
+                (activeColor ?: MaterialTheme.colorScheme.primary).copy(alpha = 0.28f)
             } else {
-                IconButtonDefaults.filledTonalIconButtonColors()
+                MaterialTheme.colorScheme.secondaryContainer
             },
-            modifier = Modifier.size(50.dp),
+            contentColor = if (active) {
+                activeColor ?: MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSecondaryContainer
+            },
+            modifier = Modifier
+                .size(50.dp)
+                .clip(CircleShape)
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = onLongClick,
+                ),
         ) {
-            Icon(icon, contentDescription = label)
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = label)
+            }
         }
-        Text(label, style = MaterialTheme.typography.labelSmall, color = labelColor)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = labelColor, maxLines = 1)
     }
 }

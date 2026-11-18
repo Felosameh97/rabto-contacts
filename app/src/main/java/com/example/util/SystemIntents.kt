@@ -224,6 +224,49 @@ object SystemIntents {
         }
     }
 
+    fun sendSms(context: Context, phone: String, body: String? = null) {
+        if (phone.isBlank()) return
+        val intent = Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:${Uri.encode(phone)}")).apply {
+            if (!body.isNullOrBlank()) {
+                putExtra("sms_body", body)
+            }
+        }
+        launchSafe(context, intent, "لا يوجد تطبيق رسائل SMS متاح")
+    }
+
+    fun copyText(context: Context, label: String, text: String, toastMessage: String? = "تم النسخ") {
+        if (text.isBlank()) return
+        runCatching {
+            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText(label, text))
+            if (!toastMessage.isNullOrBlank()) {
+                Toast.makeText(context, toastMessage, Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun shareContactAsText(context: Context, displayName: String, phones: List<String>, emails: List<String>, notes: String? = null) {
+        val text = buildString {
+            appendLine(displayName.ifBlank { "جهة اتصال" })
+            phones.filter { it.isNotBlank() }.distinct().forEach { appendLine("📞 $it") }
+            emails.filter { it.isNotBlank() }.distinct().forEach { appendLine("✉️ $it") }
+            notes?.takeIf { it.isNotBlank() }?.let { appendLine("📝 $it") }
+        }.trim()
+        if (text.isBlank()) return
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        runCatching {
+            val chooser = Intent.createChooser(intent, "مشاركة جهة الاتصال").apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+        }.onFailure {
+            Toast.makeText(context, "تعذر مشاركة جهة الاتصال", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun launchSafe(context: Context, intent: Intent, fallbackMsg: String) {
         runCatching {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

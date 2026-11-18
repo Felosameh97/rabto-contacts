@@ -10,9 +10,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -34,6 +36,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -72,6 +75,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -81,18 +85,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalTextInputService
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
@@ -101,11 +111,13 @@ import com.example.domain.model.DialHistoryEntry
 import com.example.domain.model.PaymentTemplate
 import com.example.ui.theme.InstaPayPurple
 import com.example.ui.theme.WhatsAppGreen
+import com.example.util.DialpadCursorHelper
 import com.example.util.PaymentUtils
 import com.example.util.PhoneUtils
 import com.example.util.QrUtils
 import com.example.util.SimUtils
 import com.example.util.SystemIntents
+import com.example.util.rememberDialpadTonePlayer
 import kotlinx.coroutines.delay
 import java.io.File
 import java.text.SimpleDateFormat
@@ -199,6 +211,7 @@ fun DialpadSheet(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun IntegratedKeypadPanel(
     initialDigits: String = "",
@@ -208,6 +221,7 @@ fun IntegratedKeypadPanel(
     paymentTemplates: List<PaymentTemplate>,
     showContactPhotos: Boolean,
     preferredSimSlot: Int?,
+    speedDialMap: Map<String, String> = emptyMap(),
     onQueryChange: (String) -> Unit,
     onRecordDial: (String, Boolean) -> Unit,
     onSoftDeleteHistory: (String) -> Unit,
@@ -221,7 +235,11 @@ fun IntegratedKeypadPanel(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
-    var digits by remember(initialDigits) { mutableStateOf(initialDigits) }
+    val tonePlayer = rememberDialpadTonePlayer()
+    var digitsField by remember(initialDigits) {
+        mutableStateOf(TextFieldValue(initialDigits, TextRange(initialDigits.length)))
+    }
+    val digits = digitsField.text
     var activeHistoryMode by remember { mutableStateOf<String?>(null) } // null = compact, "HISTORY", "TRASH"
     var dragOffsetY by remember { mutableFloatStateOf(0f) }
     val animatedOffsetY by animateFloatAsState(
@@ -431,7 +449,7 @@ fun IntegratedKeypadPanel(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .clickable {
-                                                digits = entry.phoneNumber
+                                                digitsField = TextFieldValue(entry.phoneNumber, TextRange(entry.phoneNumber.length))
                                                 activeHistoryMode = null
                                             },
                                     ) {
@@ -489,7 +507,7 @@ fun IntegratedKeypadPanel(
                 }
             }
 
-            // Number display bar
+            // Number display bar with movable cursor (no soft keyboard popup)
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -502,28 +520,55 @@ fun IntegratedKeypadPanel(
                     IconButton(onClick = {
                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         val clipText = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
-                        val cleaned = clipText.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
-                        if (cleaned.isNotBlank()) digits = cleaned
+                        val next = DialpadCursorHelper.pasteAtCursor(digitsField, clipText)
+                        if (next.text != digitsField.text) digitsField = next
                     }) {
                         Icon(Icons.Rounded.ContentPaste, contentDescription = "لصق")
                     }
 
-                    Text(
-                        text = digits.ifBlank { "اكتب الرقم أو التاج..." },
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        color = if (digits.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f).testTag("integrated_keypad_display"),
-                    )
+                    @Suppress("DEPRECATION")
+                    CompositionLocalProvider(
+                        LocalTextInputService provides null,
+                        LocalLayoutDirection provides LayoutDirection.Ltr,
+                    ) {
+                        BasicTextField(
+                            value = digitsField,
+                            onValueChange = { updated ->
+                                val clean = updated.text.filter { it.isDigit() || it in setOf('+', '*', '#') }
+                                val sel = TextRange(
+                                    updated.selection.start.coerceIn(0, clean.length),
+                                    updated.selection.end.coerceIn(0, clean.length),
+                                )
+                                digitsField = updated.copy(text = clean, selection = sel)
+                            },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.titleLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                textAlign = TextAlign.Center,
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.weight(1f).testTag("integrated_keypad_display"),
+                            decorationBox = { inner ->
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                    if (digits.isEmpty()) {
+                                        Text(
+                                            text = "اكتب الرقم أو التاج...",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    inner()
+                                }
+                            },
+                        )
+                    }
 
                     if (digits.isNotBlank()) {
-                        IconButton(onClick = { digits = digits.dropLast(1) }) {
+                        IconButton(onClick = { digitsField = DialpadCursorHelper.backspaceAtCursor(digitsField) }) {
                             Icon(Icons.AutoMirrored.Rounded.Backspace, contentDescription = "مسح")
                         }
-                        IconButton(onClick = { digits = "" }) {
+                        IconButton(onClick = { digitsField = DialpadCursorHelper.clearAll() }) {
                             Icon(Icons.Rounded.Clear, contentDescription = "تفريغ")
                         }
                     }
@@ -552,10 +597,24 @@ fun IntegratedKeypadPanel(
                                     .weight(1f)
                                     .height(48.dp)
                                     .clip(RoundedCornerShape(16.dp))
-                                    .clickable {
-                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                        digits += digit
-                                    }
+                                    .combinedClickable(
+                                        onClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            tonePlayer.play(digit.first())
+                                            digitsField = DialpadCursorHelper.insertAtCursor(digitsField, digit)
+                                        },
+                                        onLongClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            if (digit == "0") {
+                                                tonePlayer.play('+')
+                                                digitsField = DialpadCursorHelper.insertAtCursor(digitsField, "+")
+                                            } else {
+                                                speedDialMap[digit]?.takeIf { it.isNotBlank() }?.let { target ->
+                                                    placeCallWithSim(target, preferredSimSlot)
+                                                }
+                                            }
+                                        },
+                                    )
                                     .testTag("integrated_key_$digit"),
                             ) {
                                 Row(
@@ -678,6 +737,7 @@ fun IntegratedKeypadPanel(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DialpadContent(
     initialDigits: String = "",
@@ -687,6 +747,7 @@ fun DialpadContent(
     paymentTemplates: List<PaymentTemplate>,
     showContactPhotos: Boolean,
     preferredSimSlot: Int?,
+    speedDialMap: Map<String, String> = emptyMap(),
     onQueryChange: (String) -> Unit,
     onRecordDial: (String, Boolean) -> Unit,
     onSoftDeleteHistory: (String) -> Unit,
@@ -698,7 +759,12 @@ fun DialpadContent(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    var digits by remember(initialDigits) { mutableStateOf(initialDigits) }
+    val haptic = LocalHapticFeedback.current
+    val tonePlayer = rememberDialpadTonePlayer()
+    var digitsField by remember(initialDigits) {
+        mutableStateOf(TextFieldValue(initialDigits, TextRange(initialDigits.length)))
+    }
+    val digits = digitsField.text
     var showTrashTab by remember { mutableStateOf(false) }
     var pendingCallSlot by remember { mutableStateOf<Int?>(null) }
     var pendingCallNumber by remember { mutableStateOf("") }
@@ -877,7 +943,9 @@ fun DialpadContent(
                                 color = MaterialTheme.colorScheme.surfaceContainerLow,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { digits = entry.phoneNumber },
+                                    .clickable {
+                                        digitsField = TextFieldValue(entry.phoneNumber, TextRange(entry.phoneNumber.length))
+                                    },
                             ) {
                                 Row(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -941,7 +1009,7 @@ fun DialpadContent(
             }
         }
 
-        // Number display bar
+        // Number display bar with movable cursor (no soft keyboard popup)
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -954,28 +1022,55 @@ fun DialpadContent(
                 IconButton(onClick = {
                     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                     val clipText = cm.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
-                    val cleaned = clipText.filter { it.isDigit() || it == '+' || it == '*' || it == '#' }
-                    if (cleaned.isNotBlank()) digits = cleaned
+                    val next = DialpadCursorHelper.pasteAtCursor(digitsField, clipText)
+                    if (next.text != digitsField.text) digitsField = next
                 }) {
                     Icon(Icons.Rounded.ContentPaste, contentDescription = "لصق رقم")
                 }
 
-                Text(
-                    text = digits.ifBlank { "أدخل الرقم هنا..." },
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (digits.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f).testTag("dialpad_display_text"),
-                )
+                @Suppress("DEPRECATION")
+                CompositionLocalProvider(
+                    LocalTextInputService provides null,
+                    LocalLayoutDirection provides LayoutDirection.Ltr,
+                ) {
+                    BasicTextField(
+                        value = digitsField,
+                        onValueChange = { updated ->
+                            val clean = updated.text.filter { it.isDigit() || it in setOf('+', '*', '#') }
+                            val sel = TextRange(
+                                updated.selection.start.coerceIn(0, clean.length),
+                                updated.selection.end.coerceIn(0, clean.length),
+                            )
+                            digitsField = updated.copy(text = clean, selection = sel)
+                        },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.headlineSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Center,
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        modifier = Modifier.weight(1f).testTag("dialpad_display_text"),
+                        decorationBox = { inner ->
+                            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                                if (digits.isEmpty()) {
+                                    Text(
+                                        text = "أدخل الرقم هنا...",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                inner()
+                            }
+                        },
+                    )
+                }
 
                 if (digits.isNotBlank()) {
-                    IconButton(onClick = { digits = digits.dropLast(1) }) {
+                    IconButton(onClick = { digitsField = DialpadCursorHelper.backspaceAtCursor(digitsField) }) {
                         Icon(Icons.AutoMirrored.Rounded.Backspace, contentDescription = "مسح")
                     }
-                    IconButton(onClick = { digits = "" }) {
+                    IconButton(onClick = { digitsField = DialpadCursorHelper.clearAll() }) {
                         Icon(Icons.Rounded.Clear, contentDescription = "تفريغ")
                     }
                 }
@@ -1003,7 +1098,24 @@ fun DialpadContent(
                             modifier = Modifier
                                 .size(60.dp)
                                 .clip(CircleShape)
-                                .clickable { digits += digit }
+                                .combinedClickable(
+                                    onClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                        tonePlayer.play(digit.first())
+                                        digitsField = DialpadCursorHelper.insertAtCursor(digitsField, digit)
+                                    },
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        if (digit == "0") {
+                                            tonePlayer.play('+')
+                                            digitsField = DialpadCursorHelper.insertAtCursor(digitsField, "+")
+                                        } else {
+                                            speedDialMap[digit]?.takeIf { it.isNotBlank() }?.let { target ->
+                                                placeCallWithSim(target, preferredSimSlot)
+                                            }
+                                        }
+                                    },
+                                )
                                 .testTag("dialpad_key_$digit"),
                         ) {
                             Column(

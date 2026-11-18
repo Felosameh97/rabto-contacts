@@ -20,6 +20,7 @@ import com.example.data.local.SyncPrefsDataStore
 import com.example.data.local.WhatsAppLogEntity
 import com.example.data.remote.FirestoreContactsRepository
 import com.example.data.remote.GitHubUpdateService
+import com.example.data.remote.GoogleContactsPhotoSync
 import com.example.data.remote.GoogleDriveScanner
 import com.example.data.sync.OfflineFirstSyncEngine
 import com.example.domain.model.CallActionItem
@@ -224,6 +225,12 @@ class RabtaViewModel(
 
     val hideLockscreenCallerDetails: StateFlow<Boolean> = prefs.hideLockscreenCallerDetailsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val speedDialMap: StateFlow<Map<String, String>> = prefs.speedDialMapFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    private var dialpadContactsCache: List<ContactRecord> = emptyList()
+    private var dialpadCacheUpdatedMs: Long = 0L
 
     private val _sessionUnlockedCategories = MutableStateFlow<Set<String>>(emptySet())
     val sessionUnlockedCategories = _sessionUnlockedCategories.asStateFlow()
@@ -1073,12 +1080,25 @@ class RabtaViewModel(
             return
         }
         dialpadJob = viewModelScope.launch {
-            delay(80L)
+            delay(65L)
             val results = withContext(Dispatchers.IO) {
                 val roomHits = contactDao.searchContacts(trimmed, limit = 15, offset = 0).map { it.toDomain() }
-                val cachedList = allContactsAlphabetical.value
-                val t9Hits = if (cachedList.isNotEmpty()) {
-                    T9SearchMatcher.filterAndRank(raw, cachedList, limit = 15)
+                val flowContacts = allContactsAlphabetical.value
+                val candidatePool = if (flowContacts.isNotEmpty()) {
+                    dialpadContactsCache = flowContacts
+                    dialpadCacheUpdatedMs = System.currentTimeMillis()
+                    flowContacts
+                } else {
+                    val now = System.currentTimeMillis()
+                    if (dialpadContactsCache.isEmpty() || now - dialpadCacheUpdatedMs > 8_000L) {
+                        val loaded = contactDao.getRecentOrAllPage(limit = 5000, offset = 0).map { it.toDomain() }
+                        dialpadContactsCache = loaded
+                        dialpadCacheUpdatedMs = now
+                    }
+                    dialpadContactsCache
+                }
+                val t9Hits = if (candidatePool.isNotEmpty()) {
+                    T9SearchMatcher.filterAndRank(raw, candidatePool, limit = 15)
                 } else {
                     emptyList()
                 }
@@ -2120,6 +2140,99 @@ class RabtaViewModel(
             }
         }
         return map.values.toList()
+    }
+
+    fun assignSpeedDial(digit: String, phone: String?) {
+        val cleanDigit = digit.trim()
+        if (cleanDigit.length != 1 || cleanDigit[0] !in '1'..'9') return
+        viewModelScope.launch {
+            prefs.setSpeedDialSlot(cleanDigit, phone?.trim()?.takeIf { it.isNotBlank() })
+            _statusMessage.value = if (phone.isNullOrBlank()) {
+                "تم مسح الاختصار السريع للرقم $cleanDigit"
+            } else {
+                "تم تعيين الاتصال السريع ($cleanDigit ← $phone)"
+            }
+        }
+    }
+
+    fun syncGoogleContactsPhotos(accessToken: String) {
+        viewModelScope.launch {
+            _isBusy.value = true
+            try {
+                val existing = withContext(Dispatchers.IO) {
+                    contactDao.getRecentOrAllPage(limit = 5000, offset = 0).map { it.toDomain() }
+                }
+                if (existing.isEmpty()) {
+                    _statusMessage.value = "لا توجد جهات اتصال محفوظة داخل التطبيق لتحديث صورها"
+                    return@launch
+                }
+                val result = GoogleContactsPhotoSync.fetchAndCachePhotos(
+                    context = appContext,
+                    accessToken = accessToken,
+                    existingContacts = existing,
+                )
+                result.onSuccess { syncRes ->
+                    if (syncRes.photoUpdatesByContactId.isEmpty()) {
+                        _statusMessage.value = "تم فحص ${syncRes.scannedConnections} جهة في Google Contacts ولم يتطابق أي رقم مع صور جديدة"
+                        return@onSuccess
+                    }
+                    val updatedList = existing.mapNotNull { c ->
+                        val path = syncRes.photoUpdatesByContactId[c.id] ?: return@mapNotNull null
+                        c.copy(photoUri = path)
+                    }
+                    syncEngine.saveContactsBatchLocalFirst(
+                        contacts = updatedList,
+                        categories = emptyList(),
+                        syncToCloud = false,
+                    )
+                    dialpadCacheUpdatedMs = 0L
+                    _statusMessage.value = "تم سحب ${syncRes.photosDownloaded} صورة من Google Contacts لـ ${updatedList.size} جهة اتصال بنجاح!"
+                }.onFailure { err ->
+                    _statusMessage.value = err.localizedMessage ?: "تعذر سحب صور Google Contacts"
+                }
+            } finally {
+                _isBusy.value = false
+            }
+        }
+    }
+
+    fun syncDeviceContactsPhotosOnly() {
+        viewModelScope.launch {
+            if (!deviceContactsManager.hasReadPermission()) {
+                _statusMessage.value = "يلزم منح صلاحية قراءة جهات الاتصال لسحب الصور"
+                return@launch
+            }
+            _isBusy.value = true
+            try {
+                val existing = withContext(Dispatchers.IO) {
+                    contactDao.getRecentOrAllPage(limit = 5000, offset = 0).map { it.toDomain() }
+                }
+                val photoRes = deviceContactsManager.readDevicePhotosByPhoneKey()
+                photoRes.onSuccess { map ->
+                    if (map.isEmpty()) {
+                        _statusMessage.value = "لم يتم العثور على صور جهات اتصال محفوظة على الهاتف"
+                        return@onSuccess
+                    }
+                    val updated = existing.mapNotNull { contact ->
+                        val keys = (listOf(contact.primaryPhone) + contact.phones)
+                            .map { PhoneUtils.phoneSearchKey(it) }
+                            .filter { it.length >= 6 }
+                        val foundPhoto = keys.firstNotNullOfOrNull { map[it] } ?: return@mapNotNull null
+                        if (contact.photoUri == foundPhoto) return@mapNotNull null
+                        contact.copy(photoUri = foundPhoto)
+                    }
+                    if (updated.isNotEmpty()) {
+                        syncEngine.saveContactsBatchLocalFirst(updated, emptyList(), syncToCloud = false)
+                        dialpadCacheUpdatedMs = 0L
+                    }
+                    _statusMessage.value = "تم تحديث صور ${updated.size} جهة اتصال من الهاتف مع بقاء العزل الكامل"
+                }.onFailure { err ->
+                    _statusMessage.value = err.localizedMessage ?: "تعذر قراءة صور الهاتف"
+                }
+            } finally {
+                _isBusy.value = false
+            }
+        }
     }
 
     companion object {

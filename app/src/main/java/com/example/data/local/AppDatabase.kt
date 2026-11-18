@@ -231,6 +231,7 @@ class SyncPrefsDataStore(private val context: Context) {
     private val appLockPinHashKey = stringPreferencesKey("app_lock_pin_hash")
     private val biometricLockKey = booleanPreferencesKey("biometric_lock_enabled")
     private val hideLockscreenDetailsKey = booleanPreferencesKey("hide_lockscreen_caller_details")
+    private val speedDialMapKey = stringPreferencesKey("speed_dial_slots_v1")
 
     val githubRepoFlow: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[githubRepoKey] ?: ""
@@ -319,6 +320,10 @@ class SyncPrefsDataStore(private val context: Context) {
 
     val hideLockscreenCallerDetailsFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[hideLockscreenDetailsKey] ?: false
+    }
+
+    val speedDialMapFlow: Flow<Map<String, String>> = context.dataStore.data.map { prefs ->
+        parseSpeedDialRaw(prefs[speedDialMapKey].orEmpty())
     }
 
     suspend fun setGithubRepoSlug(slug: String) {
@@ -415,6 +420,35 @@ class SyncPrefsDataStore(private val context: Context) {
         context.dataStore.edit { prefs ->
             prefs[hideLockscreenDetailsKey] = enabled
         }
+    }
+
+    suspend fun setSpeedDialSlot(digit: String, phone: String?) {
+        val cleanDigit = digit.trim().take(1)
+        if (cleanDigit !in listOf("1", "2", "3", "4", "5", "6", "7", "8", "9")) return
+        context.dataStore.edit { prefs ->
+            val map = parseSpeedDialRaw(prefs[speedDialMapKey].orEmpty()).toMutableMap()
+            val cleanPhone = phone?.trim().orEmpty()
+            if (cleanPhone.isBlank()) {
+                map.remove(cleanDigit)
+            } else {
+                map[cleanDigit] = cleanPhone
+            }
+            prefs[speedDialMapKey] = map.entries.joinToString(TEMPLATE_DELIM) { "${it.key}=${it.value}" }
+        }
+    }
+
+    private fun parseSpeedDialRaw(raw: String): Map<String, String> {
+        if (raw.isBlank()) return emptyMap()
+        val out = LinkedHashMap<String, String>()
+        raw.split(TEMPLATE_DELIM).forEach { pair ->
+            val idx = pair.indexOf('=')
+            if (idx > 0) {
+                val k = pair.substring(0, idx).trim()
+                val v = pair.substring(idx + 1).trim()
+                if (k.isNotBlank() && v.isNotBlank()) out[k] = v
+            }
+        }
+        return out
     }
 
     companion object {

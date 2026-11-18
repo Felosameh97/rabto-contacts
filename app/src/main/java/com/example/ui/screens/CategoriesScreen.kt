@@ -58,6 +58,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.CategorySummary
 import com.example.domain.model.ContactRecord
+import com.example.ui.components.ContactContextActionsSheet
 import com.example.ui.components.ContactSummaryCard
 import com.example.util.BiometricVaultHelper
 import com.example.util.SystemIntents
@@ -86,10 +87,18 @@ fun CategoriesScreen(
     onShareExport: (Boolean) -> Unit,
     onToggleCategoryLock: (String) -> Unit = {},
     onUnlockCategorySession: (String) -> Unit = {},
+    speedDialMap: Map<String, String> = emptyMap(),
+    onEditNumberInKeypad: ((String) -> Unit)? = null,
+    onAssignSpeedDial: ((String, String) -> Unit)? = null,
+    onToggleFavorite: ((ContactRecord) -> Unit)? = null,
+    onToggleMuted: ((ContactRecord) -> Unit)? = null,
+    onToggleBlocked: ((ContactRecord) -> Unit)? = null,
+    onDeleteContact: ((ContactRecord) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var bulkMode by remember { mutableStateOf(false) }
     var showNewCatDialog by remember { mutableStateOf(false) }
+    var contextContactTarget by remember { mutableStateOf<ContactRecord?>(null) }
 
     if (currentPath.isNotEmpty()) {
         BackHandler { onNavigateUp() }
@@ -347,6 +356,7 @@ fun CategoriesScreen(
                         bulkMode = bulkMode,
                         isSelected = selectedBulkIds.contains(contact.id),
                         onToggleSelect = { onToggleBulk(contact.id) },
+                        onLongClick = { contextContactTarget = contact },
                     )
                 }
             }
@@ -413,6 +423,24 @@ fun CategoriesScreen(
             dismissButton = {
                 TextButton(onClick = { showNewCatDialog = false }) { Text("إلغاء") }
             },
+        )
+    }
+
+    contextContactTarget?.let { target ->
+        ContactContextActionsSheet(
+            contact = target,
+            showContactPhotos = showContactPhotos,
+            speedDialMap = speedDialMap,
+            onDismiss = { contextContactTarget = null },
+            onCall = { p, slot -> SystemIntents.dialPhoneWithSimSlot(context, p, slot ?: preferredSimSlot) },
+            onWhatsApp = onWhatsApp,
+            onOpenProfile = onOpenContact,
+            onEditInKeypad = onEditNumberInKeypad,
+            onAssignSpeedDial = onAssignSpeedDial,
+            onToggleFavorite = onToggleFavorite,
+            onToggleMuted = onToggleMuted,
+            onToggleBlocked = onToggleBlocked,
+            onDeleteContact = onDeleteContact,
         )
     }
 }

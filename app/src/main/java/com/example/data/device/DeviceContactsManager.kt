@@ -1,12 +1,14 @@
 package com.example.data.device
 
 import android.Manifest
+import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
 import android.provider.ContactsContract
 import androidx.core.content.ContextCompat
 import com.example.domain.model.ContactRecord
 import com.example.util.ContactDeduplicator
+import com.example.util.ContactPhotoStorage
 import com.example.util.PhoneUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -150,8 +152,11 @@ class DeviceContactsManager(private val context: Context) {
                 val nick = nickByCid[cid]
                 val rawLabels = labelsByCid[cid]?.toList().orEmpty() + listOf("الهاتف (مستورد)")
 
+                val detId = ContactDeduplicator.deterministicContactId(phones, emails, displayName)
+                val cachedPhoto = readDeviceContactPhotoPath(cid, detId)
+
                 val rawRecord = ContactRecord(
-                    id = ContactDeduplicator.deterministicContactId(phones, emails, displayName),
+                    id = detId,
                     displayName = displayName.take(200),
                     nickname = nick,
                     primaryPhone = phones.firstOrNull().orEmpty(),
@@ -162,6 +167,7 @@ class DeviceContactsManager(private val context: Context) {
                     jobTitle = orgPair?.second,
                     notes = notes,
                     address = address,
+                    photoUri = cachedPhoto,
                     syncedToDevice = false, // Keep isolated inside Felo Contacts unless explicitly flagged
                     isFavorite = starredSet.contains(cid),
                 )
@@ -178,6 +184,69 @@ class DeviceContactsManager(private val context: Context) {
             }
 
             records to discoveredCats
+        }
+    }
+
+    private suspend fun readDeviceContactPhotoPath(contactId: Long, hintId: String): String? {
+        val bytes = runCatching {
+            val contactUri = ContentUris.withAppendedId(ContactsContract.Contacts.CONTENT_URI, contactId)
+            ContactsContract.Contacts.openContactPhotoInputStream(context.contentResolver, contactUri, true)
+                ?.use { it.readBytes() }
+        }.getOrNull() ?: return null
+        return ContactPhotoStorage.savePhotoBytes(context, bytes, hintId)
+    }
+
+    /**
+     * One-way read of contact photos from Android's local Contacts provider matched by normalized phone key.
+     * Never writes to or modifies ContactsContract.
+     */
+    suspend fun readDevicePhotosByPhoneKey(): Result<Map<String, String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            if (!hasReadPermission()) throw SecurityException("صلاحية قراءة جهات الاتصال غير ممنوحة")
+            val contactIdsWithPhoto = HashSet<Long>()
+            context.contentResolver.query(
+                ContactsContract.Contacts.CONTENT_URI,
+                arrayOf(ContactsContract.Contacts._ID, ContactsContract.Contacts.PHOTO_URI),
+                "${ContactsContract.Contacts.PHOTO_URI} IS NOT NULL",
+                null,
+                null,
+            )?.use { c ->
+                val idIdx = c.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
+                while (c.moveToNext()) {
+                    contactIdsWithPhoto += c.getLong(idIdx)
+                }
+            }
+            if (contactIdsWithPhoto.isEmpty()) return@runCatching emptyMap()
+
+            val phonesByCid = HashMap<Long, MutableList<String>>()
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.CONTACT_ID, ContactsContract.CommonDataKinds.Phone.NUMBER),
+                null,
+                null,
+                null,
+            )?.use { c ->
+                val cidIdx = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.CONTACT_ID)
+                val numIdx = c.getColumnIndexOrThrow(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                while (c.moveToNext()) {
+                    val cid = c.getLong(cidIdx)
+                    if (!contactIdsWithPhoto.contains(cid)) continue
+                    val key = PhoneUtils.phoneSearchKey(c.getString(numIdx).orEmpty())
+                    if (key.length >= 6) {
+                        phonesByCid.getOrPut(cid) { mutableListOf() }.add(key)
+                    }
+                }
+            }
+
+            val result = HashMap<String, String>()
+            for ((cid, keys) in phonesByCid) {
+                if (keys.isEmpty()) continue
+                val savedPath = readDeviceContactPhotoPath(cid, "dev_$cid") ?: continue
+                keys.forEach { key ->
+                    result.putIfAbsent(key, savedPath)
+                }
+            }
+            result
         }
     }
 

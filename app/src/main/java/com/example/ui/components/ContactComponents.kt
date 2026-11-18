@@ -13,9 +13,11 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -108,8 +110,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -143,6 +147,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ContactSummaryCard(
     contact: ContactRecord,
@@ -153,7 +158,9 @@ fun ContactSummaryCard(
     bulkMode: Boolean = false,
     isSelected: Boolean = false,
     onToggleSelect: () -> Unit = {},
+    onLongClick: (() -> Unit)? = null,
 ) {
+    val haptic = LocalHapticFeedback.current
     val primary = contact.primaryPhone.ifBlank { contact.phones.firstOrNull().orEmpty() }
     val canSwipeCall = primary.isNotBlank() && !bulkMode
     val canSwipeWa = canSwipeCall && !PhoneUtils.isUssdOrShortCode(primary)
@@ -219,7 +226,15 @@ fun ContactSummaryCard(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { if (bulkMode) onToggleSelect() else onClick() }
+                .combinedClickable(
+                    onClick = { if (bulkMode) onToggleSelect() else onClick() },
+                    onLongClick = if (!bulkMode && onLongClick != null) {
+                        {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            onLongClick()
+                        }
+                    } else null,
+                )
                 .testTag("contact_card_${contact.id}"),
         ) {
             Row(

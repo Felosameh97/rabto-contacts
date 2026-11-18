@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -67,7 +68,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -80,6 +83,7 @@ import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.telecom.PostCallSummary
 import com.example.ui.components.ContactAvatarBadge
+import com.example.ui.components.PhoneNumberContextActionsSheet
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.WhatsAppGreen
 import com.example.util.EgyptGeoLookup
@@ -110,11 +114,14 @@ fun RecentsScreen(
     hasCallLogPermission: Boolean,
     showContactPhotos: Boolean,
     preferredSimSlot: Int?,
+    speedDialMap: Map<String, String> = emptyMap(),
     postCallSummary: PostCallSummary?,
     whatsappTemplates: List<String>,
     onRecordDial: (String, Boolean) -> Unit,
     onOpenContact: (ContactRecord) -> Unit,
     onSaveNumber: (String) -> Unit,
+    onEditNumberInKeypad: ((String) -> Unit)? = null,
+    onAssignSpeedDial: ((String, String) -> Unit)? = null,
     onOpenTranscript: (CallTranscriptRecord) -> Unit,
     onDeleteCallLog: (CallLogEntry) -> Unit,
     onWhatsApp: (ContactRecord, String) -> Unit,
@@ -129,6 +136,7 @@ fun RecentsScreen(
     var activeFilter by remember { mutableStateOf(RecentsFilter.ALL) }
     var showPostCallWaTemplates by remember { mutableStateOf(false) }
     var swipeChoiceTarget by remember { mutableStateOf<Pair<CallLogEntry, CallTranscriptRecord>?>(null) }
+    var contextLogTarget by remember { mutableStateOf<Pair<CallLogEntry, CallTranscriptRecord?>?>(null) }
 
     val callLogLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -464,6 +472,9 @@ fun RecentsScreen(
                                         onDeleteCallLog(entry)
                                     }
                                 },
+                                onLongClick = {
+                                    contextLogTarget = entry to transcript
+                                },
                             )
                         }
                     }
@@ -545,8 +556,44 @@ fun RecentsScreen(
             },
         )
     }
+
+    contextLogTarget?.let { (entry, transcript) ->
+        val label = entry.matchedContact?.displayName
+            ?.takeIf { it.isNotBlank() }
+            ?: entry.cachedName?.takeIf { it.isNotBlank() }
+            ?: entry.number
+        PhoneNumberContextActionsSheet(
+            title = label,
+            phoneNumber = entry.number,
+            matchedContact = entry.matchedContact,
+            linkedTranscript = transcript,
+            speedDialMap = speedDialMap,
+            onDismiss = { contextLogTarget = null },
+            onCall = { phone, slot ->
+                onRecordDial(phone, true)
+                SystemIntents.dialPhoneWithSimSlot(context, phone, slot ?: preferredSimSlot)
+            },
+            onWhatsApp = { phone ->
+                val targetContact = entry.matchedContact ?: ContactRecord(
+                    id = "log_${entry.id}",
+                    displayName = label,
+                    primaryPhone = phone,
+                    phones = listOf(phone),
+                )
+                onWhatsApp(targetContact, phone)
+            },
+            onEditInKeypad = onEditNumberInKeypad,
+            onSaveNewNumber = onSaveNumber,
+            onOpenContact = onOpenContact,
+            onOpenTranscript = onOpenTranscript,
+            onAssignSpeedDial = onAssignSpeedDial,
+            onDeleteEntry = { onDeleteCallLog(entry) },
+            deleteLabel = "حذف المكالمة من السجل",
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RecentCallLogRow(
     entry: CallLogEntry,
@@ -557,7 +604,9 @@ private fun RecentCallLogRow(
     onDial: () -> Unit,
     onOpenTranscript: () -> Unit,
     onSwipeLeft: () -> Unit,
+    onLongClick: () -> Unit,
 ) {
+    val haptic = LocalHapticFeedback.current
     val label = entry.matchedContact?.displayName
         ?.takeIf { it.isNotBlank() }
         ?: entry.cachedName?.takeIf { it.isNotBlank() }
@@ -649,7 +698,13 @@ private fun RecentCallLogRow(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onOpen)
+                .combinedClickable(
+                    onClick = onOpen,
+                    onLongClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onLongClick()
+                    },
+                )
                 .testTag("recent_call_card_${entry.id}"),
         ) {
             Row(

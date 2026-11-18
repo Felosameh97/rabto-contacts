@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.example.BuildConfig
 import com.example.R
+import com.example.data.remote.GoogleContactsPhotoSync
 import com.example.data.remote.GoogleDriveScanner
 import com.example.domain.model.GitHubReleaseInfo
 import com.example.domain.model.PaymentTemplate
@@ -80,6 +81,8 @@ internal fun DataImportSettingsPage(
     onImportBundledCsv: () -> Unit,
     onImportDevicePhonebook: () -> Unit,
     onScanGoogleDrive: (String) -> Unit,
+    onSyncGoogleContactsPhotos: (String) -> Unit = {},
+    onSyncDevicePhotosOnly: () -> Unit = {},
     onPullFromCloud: () -> Unit,
     onExportJson: () -> Unit,
     onShareExport: (Boolean) -> Unit,
@@ -90,6 +93,7 @@ internal fun DataImportSettingsPage(
     filePicker: ManagedActivityResultLauncher<Array<String>, android.net.Uri?>,
     readPhonebookPermLauncher: ManagedActivityResultLauncher<String, Boolean>,
     driveAuthLauncher: ManagedActivityResultLauncher<IntentSenderRequest, androidx.activity.result.ActivityResult>,
+    googlePhotosAuthLauncher: ManagedActivityResultLauncher<IntentSenderRequest, androidx.activity.result.ActivityResult>? = null,
 ) {
     val context = LocalContext.current
     val activity = context as? Activity
@@ -169,6 +173,54 @@ internal fun DataImportSettingsPage(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        FilledTonalButton(
+                            onClick = {
+                                val act = activity ?: return@FilledTonalButton
+                                scope.launch {
+                                    GoogleContactsPhotoSync.requestContactsAuthorization(act)
+                                        .onSuccess { authResult ->
+                                            if (authResult.hasResolution()) {
+                                                val pending = authResult.pendingIntent
+                                                if (pending != null && googlePhotosAuthLauncher != null) {
+                                                    googlePhotosAuthLauncher.launch(IntentSenderRequest.Builder(pending.intentSender).build())
+                                                }
+                                            } else {
+                                                val token = authResult.accessToken
+                                                if (!token.isNullOrBlank()) {
+                                                    onSetDriveErrorMsg(null)
+                                                    onSyncGoogleContactsPhotos(token)
+                                                } else {
+                                                    onSetDriveErrorMsg("تعذر الحصول على تصريح صور Google Contacts")
+                                                }
+                                            }
+                                        }
+                                        .onFailure { err ->
+                                            onSetDriveErrorMsg("فشل سحب صور Google Contacts: ${err.localizedMessage}")
+                                        }
+                                }
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.weight(1f).testTag("tools_sync_google_photos_btn"),
+                        ) {
+                            Icon(Icons.Rounded.Contacts, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("سحب صور Google Contacts", maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+                                if (granted) onSyncDevicePhotosOnly() else readPhonebookPermLauncher.launch(Manifest.permission.READ_CONTACTS)
+                            },
+                            enabled = !isBusy,
+                            modifier = Modifier.testTag("tools_sync_device_photos_btn"),
+                        ) {
+                            Icon(Icons.Rounded.PhoneAndroid, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("صور الهاتف", maxLines = 1)
+                        }
                     }
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {

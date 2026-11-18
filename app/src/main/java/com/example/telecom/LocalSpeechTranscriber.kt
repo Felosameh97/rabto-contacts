@@ -20,6 +20,7 @@ data class LiveTranscriptState(
     val partialText: String = "",
     val rmsDb: Float = 0f,
     val errorNote: String? = null,
+    val requiresAiRecordingFallback: Boolean = false,
 ) {
     val fullText: String
         get() = listOf(confirmedText, partialText)
@@ -30,7 +31,8 @@ data class LiveTranscriptState(
 
 /**
  * Continuous real-time speech-to-text transcriber powered by Android SpeechRecognizer.
- * Uses zero Gemini tokens, automatically falls back across languages/backends, and exposes live RMS.
+ * Automatically falls back across Arabic/English locales and flags in-call recording + Gemini AI
+ * fallback whenever the device lacks an offline speech pack or restricts mic capture during calls.
  */
 class LocalSpeechTranscriber(private val context: Context) {
 
@@ -52,7 +54,8 @@ class LocalSpeechTranscriber(private val context: Context) {
             if (!isAvailable()) {
                 _state.value = _state.value.copy(
                     isListening = false,
-                    errorNote = "خدمة التعرف على الكلام غير متوفرة — يمكنك استخدام نافذة Google الصوتية بالأسفل",
+                    requiresAiRecordingFallback = true,
+                    errorNote = "تم تفعيل التفريغ الذكي التلقائي عبر تسجيل الصوت + Gemini AI",
                 )
                 return@post
             }
@@ -60,7 +63,11 @@ class LocalSpeechTranscriber(private val context: Context) {
             preferOnDeviceFallback = false
             retryCount = 0
             shouldKeepListening = true
-            _state.value = _state.value.copy(isListening = true, errorNote = null)
+            _state.value = _state.value.copy(
+                isListening = true,
+                requiresAiRecordingFallback = false,
+                errorNote = null,
+            )
             startCycle(activeLanguageTag)
         }
     }
@@ -115,8 +122,12 @@ class LocalSpeechTranscriber(private val context: Context) {
         return when (current) {
             "ar-EG" -> "ar-SA"
             "ar-SA" -> "ar"
-            "ar" -> Locale.getDefault().toLanguageTag().takeIf { it.isNotBlank() && it != "ar" } ?: "en-US"
-            else -> null
+            "ar" -> {
+                val sys = Locale.getDefault().toLanguageTag()
+                if (sys.isNotBlank() && !sys.startsWith("ar")) sys else "en-US"
+            }
+            "en-US" -> null
+            else -> if (current != "en-US") "en-US" else null
         }
     }
 
@@ -135,11 +146,12 @@ class LocalSpeechTranscriber(private val context: Context) {
     private fun startCycle(languageTag: String) {
         if (!shouldKeepListening) return
         runCatching { recognizer?.destroy() }
-        val sr = runCatching { createRecognizer() }.getOrElse { err ->
+        val sr = runCatching { createRecognizer() }.getOrElse {
             shouldKeepListening = false
             _state.value = _state.value.copy(
                 isListening = false,
-                errorNote = "تعذر تشغيل محرك الصوت (${err.localizedMessage}) — جرب نافذة Google الصوتية",
+                requiresAiRecordingFallback = true,
+                errorNote = "تم التحويل للتفريغ الذكي عبر التسجيل الصوتي",
             )
             return
         }
@@ -198,7 +210,7 @@ class LocalSpeechTranscriber(private val context: Context) {
                 commitPartialIntoConfirmed()
                 if (!shouldKeepListening) return
 
-                // Automatic language fallback when ar-EG offline/online model reports unsupported (12 / 13)
+                // Automatic language fallback when ar-EG model is missing / unavailable (12 / 13)
                 if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
                     error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
                 ) {
@@ -206,7 +218,7 @@ class LocalSpeechTranscriber(private val context: Context) {
                     if (fallback != null) {
                         Log.w(TAG, "Language $activeLanguageTag unsupported ($error), switching to $fallback")
                         activeLanguageTag = fallback
-                        mainHandler.postDelayed({ startCycle(activeLanguageTag) }, 200L)
+                        mainHandler.postDelayed({ startCycle(activeLanguageTag) }, 180L)
                         return
                     }
                 }
@@ -219,7 +231,7 @@ class LocalSpeechTranscriber(private val context: Context) {
                 ) {
                     preferOnDeviceFallback = true
                     Log.w(TAG, "Network error ($error), trying on-device SpeechRecognizer")
-                    mainHandler.postDelayed({ startCycle(activeLanguageTag) }, 250L)
+                    mainHandler.postDelayed({ startCycle(activeLanguageTag) }, 220L)
                     return
                 }
 
@@ -241,20 +253,29 @@ class LocalSpeechTranscriber(private val context: Context) {
                     return
                 }
 
-                Log.w(TAG, "SpeechRecognizer fatal error=$error")
+                Log.w(TAG, "SpeechRecognizer switched to AI fallback on error=$error")
+                val needsRecordingAi = error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
+                    error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ||
+                    error == SpeechRecognizer.ERROR_AUDIO ||
+                    error == SpeechRecognizer.ERROR_NETWORK ||
+                    error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT ||
+                    error == 14 // ERROR_CANNOT_CHECK_SUPPORT / server restriction
+
                 val msg = when (error) {
                     SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "يرجى منح صلاحية الميكروفون"
-                    SpeechRecognizer.ERROR_AUDIO -> "الميكروفون مشغول بتطبيق آخر (جرّب فتح السبيكر أو الإدخال الصوتي بالأسفل)"
-                    SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
-                        "تحقق من الإنترنت أو استخدم الإدخال الصوتي من Google بالأسفل"
-                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED, SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE ->
-                        "حزمة اللغة غير مثبتة — جرب الإدخال الصوتي من Google بالأسفل"
-                    else -> "توقف التفريغ المباشر (كود $error) — يمكنك استخدام الإدخال الصوتي من Google بالأسفل"
+                    SpeechRecognizer.ERROR_AUDIO,
+                    SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED,
+                    SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE,
+                    SpeechRecognizer.ERROR_NETWORK,
+                    SpeechRecognizer.ERROR_NETWORK_TIMEOUT ->
+                        "تم التحويل تلقائياً للتسجيل الصوتي + التفريغ بـ Gemini AI"
+                    else -> "توقف التفريغ المباشر — جاري حفظ الصوت للتفريغ بـ Gemini AI"
                 }
                 shouldKeepListening = false
                 _state.value = _state.value.copy(
                     isListening = false,
                     rmsDb = 0f,
+                    requiresAiRecordingFallback = needsRecordingAi,
                     errorNote = msg,
                 )
             }
@@ -268,15 +289,16 @@ class LocalSpeechTranscriber(private val context: Context) {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, activeLanguageTag)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
             putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, context.packageName)
         }
-        runCatching { sr.startListening(intent) }.onFailure { err ->
-            Log.w(TAG, "startListening failed: ${err.message}")
+        runCatching { sr.startListening(intent) }.onFailure {
             shouldKeepListening = false
             _state.value = _state.value.copy(
                 isListening = false,
                 rmsDb = 0f,
-                errorNote = err.localizedMessage ?: "تعذر بدء الميكروفون",
+                requiresAiRecordingFallback = true,
+                errorNote = "تم التحويل للتفريغ الذكي عبر التسجيل الصوتي + Gemini AI",
             )
         }
     }

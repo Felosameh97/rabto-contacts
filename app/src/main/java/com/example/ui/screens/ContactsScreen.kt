@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
@@ -66,9 +67,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -76,11 +79,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.domain.model.CallLogEntry
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.ContactRecord
 import com.example.domain.model.GlobalSearchResult
 import com.example.ui.components.ContactAvatarBadge
+import com.example.ui.components.ContactContextActionsSheet
 import com.example.ui.components.ContactSummaryCard
+import com.example.ui.components.PhoneNumberContextActionsSheet
+import com.example.ui.components.TranscriptContextActionsSheet
 import com.example.ui.theme.ErrorRed
 import com.example.util.SystemIntents
 import kotlinx.coroutines.launch
@@ -121,6 +128,7 @@ fun ContactsScreen(
     globalSearchResult: GlobalSearchResult,
     showContactPhotos: Boolean,
     preferredSimSlot: Int?,
+    speedDialMap: Map<String, String> = emptyMap(),
     onSearchQueryChange: (String) -> Unit,
     onRecordDial: (String, Boolean) -> Unit,
     onOpenContact: (ContactRecord) -> Unit,
@@ -130,8 +138,15 @@ fun ContactsScreen(
     onOpenQrScanner: () -> Unit,
     onImportBundledCsv: () -> Unit,
     onOpenDuplicates: () -> Unit = {},
+    onEditNumberInKeypad: ((String) -> Unit)? = null,
+    onAssignSpeedDial: ((String, String) -> Unit)? = null,
+    onToggleFavorite: ((ContactRecord) -> Unit)? = null,
+    onToggleMuted: ((ContactRecord) -> Unit)? = null,
+    onToggleBlocked: ((ContactRecord) -> Unit)? = null,
+    onDeleteContact: ((ContactRecord) -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -139,6 +154,9 @@ fun ContactsScreen(
     var selectedTag by remember { mutableStateOf<String?>(null) }
     var scrubbingLetter by remember { mutableStateOf<String?>(null) }
     var scrubberHeightPx by remember { mutableStateOf(1) }
+    var contextContactTarget by remember { mutableStateOf<ContactRecord?>(null) }
+    var contextTranscriptTarget by remember { mutableStateOf<CallTranscriptRecord?>(null) }
+    var contextCallTarget by remember { mutableStateOf<CallLogEntry?>(null) }
 
     val availableTags = remember(allContacts) {
         allContacts
@@ -386,6 +404,7 @@ fun ContactsScreen(
                                     SystemIntents.dialPhoneWithSimSlot(context, phone, preferredSimSlot)
                                 },
                                 onWhatsApp = { phone -> onWhatsApp(contact, phone) },
+                                onLongClick = { contextContactTarget = contact },
                             )
                         }
                     }
@@ -404,7 +423,13 @@ fun ContactsScreen(
                                 color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f),
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { onOpenTranscript(tr) },
+                                    .combinedClickable(
+                                        onClick = { onOpenTranscript(tr) },
+                                        onLongClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            contextTranscriptTarget = tr
+                                        },
+                                    ),
                             ) {
                                 Row(
                                     modifier = Modifier.padding(12.dp),
@@ -451,12 +476,18 @@ fun ContactsScreen(
                                 color = MaterialTheme.colorScheme.surfaceContainerLow,
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable {
-                                        call.matchedContact?.let(onOpenContact) ?: run {
-                                            onRecordDial(call.number, true)
-                                            SystemIntents.dialPhoneWithSimSlot(context, call.number, preferredSimSlot)
-                                        }
-                                    },
+                                    .combinedClickable(
+                                        onClick = {
+                                            call.matchedContact?.let(onOpenContact) ?: run {
+                                                onRecordDial(call.number, true)
+                                                SystemIntents.dialPhoneWithSimSlot(context, call.number, preferredSimSlot)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            contextCallTarget = call
+                                        },
+                                    ),
                             ) {
                                 Row(
                                     modifier = Modifier.padding(12.dp),
@@ -533,7 +564,13 @@ fun ContactsScreen(
                                         color = MaterialTheme.colorScheme.surfaceContainerLow,
                                         modifier = Modifier
                                             .width(142.dp)
-                                            .clickable { onOpenContact(fav) },
+                                            .combinedClickable(
+                                                onClick = { onOpenContact(fav) },
+                                                onLongClick = {
+                                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                    contextContactTarget = fav
+                                                },
+                                            ),
                                     ) {
                                         Column(
                                             modifier = Modifier.padding(10.dp),
@@ -592,6 +629,7 @@ fun ContactsScreen(
                                     SystemIntents.dialPhoneWithSimSlot(context, phone, preferredSimSlot)
                                 },
                                 onWhatsApp = { phone -> onWhatsApp(contact, phone) },
+                                onLongClick = { contextContactTarget = contact },
                             )
                         }
                     } else if (filteredContacts.isEmpty()) {
@@ -655,6 +693,7 @@ fun ContactsScreen(
                                         SystemIntents.dialPhoneWithSimSlot(context, phone, preferredSimSlot)
                                     },
                                     onWhatsApp = { phone -> onWhatsApp(contact, phone) },
+                                    onLongClick = { contextContactTarget = contact },
                                 )
                             }
                         }
@@ -760,6 +799,57 @@ fun ContactsScreen(
                 }
             }
         }
+    }
+
+    contextContactTarget?.let { target ->
+        ContactContextActionsSheet(
+            contact = target,
+            showContactPhotos = showContactPhotos,
+            speedDialMap = speedDialMap,
+            onDismiss = { contextContactTarget = null },
+            onCall = { p, slot ->
+                onRecordDial(p, true)
+                SystemIntents.dialPhoneWithSimSlot(context, p, slot ?: preferredSimSlot)
+            },
+            onWhatsApp = onWhatsApp,
+            onOpenProfile = onOpenContact,
+            onEditInKeypad = onEditNumberInKeypad,
+            onAssignSpeedDial = onAssignSpeedDial,
+            onToggleFavorite = onToggleFavorite,
+            onToggleMuted = onToggleMuted,
+            onToggleBlocked = onToggleBlocked,
+            onDeleteContact = onDeleteContact,
+        )
+    }
+
+    contextTranscriptTarget?.let { tr ->
+        TranscriptContextActionsSheet(
+            transcript = tr,
+            onDismiss = { contextTranscriptTarget = null },
+            onOpenPlayer = onOpenTranscript,
+        )
+    }
+
+    contextCallTarget?.let { call ->
+        val label = call.matchedContact?.displayName ?: call.cachedName ?: call.number
+        PhoneNumberContextActionsSheet(
+            title = label,
+            phoneNumber = call.number,
+            matchedContact = call.matchedContact,
+            speedDialMap = speedDialMap,
+            onDismiss = { contextCallTarget = null },
+            onCall = { p, slot ->
+                onRecordDial(p, true)
+                SystemIntents.dialPhoneWithSimSlot(context, p, slot ?: preferredSimSlot)
+            },
+            onWhatsApp = { p ->
+                val c = call.matchedContact ?: ContactRecord(id = "c_${call.id}", displayName = label, primaryPhone = p, phones = listOf(p))
+                onWhatsApp(c, p)
+            },
+            onEditInKeypad = onEditNumberInKeypad,
+            onOpenContact = onOpenContact,
+            onAssignSpeedDial = onAssignSpeedDial,
+        )
     }
 }
 

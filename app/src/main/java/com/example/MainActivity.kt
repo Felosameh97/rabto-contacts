@@ -381,6 +381,7 @@ private fun AuthenticatedMainScreen(
     val isBusy by viewModel.isBusy.collectAsStateWithLifecycle()
     val statusMsg by viewModel.statusMessage.collectAsStateWithLifecycle()
     val pendingWaCapture by viewModel.pendingWhatsAppCapture.collectAsStateWithLifecycle()
+    val speedDialMap by viewModel.speedDialMap.collectAsStateWithLifecycle()
 
     var editingContact by remember { mutableStateOf<ContactRecord?>(null) }
     var editorCategorySeed by remember { mutableStateOf("") }
@@ -618,6 +619,7 @@ private fun AuthenticatedMainScreen(
                                 paymentTemplates = paymentTemplates,
                                 showContactPhotos = showContactPhotos,
                                 preferredSimSlot = preferredSimSlot,
+                                speedDialMap = speedDialMap,
                                 preCallContext = preCallContext,
                                 onLookupPreCallContext = viewModel::loadPreCallContext,
                                 onQueryChange = viewModel::searchForDialpad,
@@ -632,6 +634,11 @@ private fun AuthenticatedMainScreen(
                                     editorCategorySeed = ""
                                     showEditor = true
                                 },
+                                onAssignSpeedDial = viewModel::assignSpeedDial,
+                                onToggleFavorite = viewModel::toggleFavorite,
+                                onToggleMuted = viewModel::toggleMuted,
+                                onToggleBlocked = viewModel::toggleBlocked,
+                                onDeleteContact = viewModel::deleteContact,
                             )
                         }
 
@@ -642,6 +649,7 @@ private fun AuthenticatedMainScreen(
                                 hasCallLogPermission = hasCallLogPerm,
                                 showContactPhotos = showContactPhotos,
                                 preferredSimSlot = preferredSimSlot,
+                                speedDialMap = speedDialMap,
                                 postCallSummary = postCallSummary,
                                 whatsappTemplates = whatsappTemplates,
                                 onRecordDial = viewModel::recordDialHistoryDraft,
@@ -651,6 +659,11 @@ private fun AuthenticatedMainScreen(
                                     editorCategorySeed = ""
                                     showEditor = true
                                 },
+                                onEditNumberInKeypad = { num ->
+                                    dialpadSeed = num
+                                    navigateTopTab(RouteKeypad)
+                                },
+                                onAssignSpeedDial = { d, p -> viewModel.assignSpeedDial(d, p) },
                                 onOpenTranscript = { tr -> activeTranscriptModal = tr },
                                 onDeleteCallLog = { entry ->
                                     viewModel.softDeleteCallLog(entry.id)
@@ -688,6 +701,7 @@ private fun AuthenticatedMainScreen(
                                 globalSearchResult = globalSearchResult,
                                 showContactPhotos = showContactPhotos,
                                 preferredSimSlot = preferredSimSlot,
+                                speedDialMap = speedDialMap,
                                 onSearchQueryChange = viewModel::updateSearchQuery,
                                 onRecordDial = viewModel::recordDialHistoryDraft,
                                 onOpenContact = viewModel::openContact,
@@ -702,6 +716,15 @@ private fun AuthenticatedMainScreen(
                                     showDuplicateMerge = true
                                 },
                                 onImportBundledCsv = { viewModel.importBundledDatasets(uploadToCloud = true) },
+                                onEditNumberInKeypad = { num ->
+                                    dialpadSeed = num
+                                    navigateTopTab(RouteKeypad)
+                                },
+                                onAssignSpeedDial = { d, p -> viewModel.assignSpeedDial(d, p) },
+                                onToggleFavorite = viewModel::toggleFavorite,
+                                onToggleMuted = viewModel::toggleMuted,
+                                onToggleBlocked = viewModel::toggleBlocked,
+                                onDeleteContact = viewModel::deleteContact,
                             )
                         }
 
@@ -767,6 +790,16 @@ private fun AuthenticatedMainScreen(
                                 onShareExport = viewModel::shareBulkOrCategory,
                                 onToggleCategoryLock = viewModel::toggleCategoryLock,
                                 onUnlockCategorySession = viewModel::markCategoryUnlockedForSession,
+                                speedDialMap = speedDialMap,
+                                onEditNumberInKeypad = { num ->
+                                    dialpadSeed = num
+                                    navigateTopTab(RouteKeypad)
+                                },
+                                onAssignSpeedDial = { d, p -> viewModel.assignSpeedDial(d, p) },
+                                onToggleFavorite = viewModel::toggleFavorite,
+                                onToggleMuted = viewModel::toggleMuted,
+                                onToggleBlocked = viewModel::toggleBlocked,
+                                onDeleteContact = viewModel::deleteContact,
                             )
                         }
 
@@ -859,6 +892,8 @@ private fun AuthenticatedMainScreen(
                                     showAiSheet = true
                                     viewModel.runAiBilingualEnrichBatch()
                                 },
+                                onSyncGoogleContactsPhotos = viewModel::syncGoogleContactsPhotos,
+                                onSyncDevicePhotosOnly = viewModel::syncDeviceContactsPhotosOnly,
                             )
                         }
                         }
@@ -1173,16 +1208,25 @@ private fun FloatingActiveCallBar(
         (context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager)?.isKeyguardLocked == true
     }
     val maskDetails = keyguardLocked && (hideLockscreenDetails || callUi.hideLockscreenDetails)
-    val callerLabel = if (maskDetails) {
-        "مكالمة جارية (خاص)"
-    } else {
-        callUi.matchedContact?.displayName?.ifBlank { callUi.phoneNumber } ?: callUi.phoneNumber.ifBlank { "مكالمة نشطة" }
+    val callerLabel = when {
+        maskDetails -> "مكالمة جارية (خاص)"
+        callUi.isConferenceCall -> "مكالمة جماعية (${callUi.conferenceParticipants.size.coerceAtLeast(2)})"
+        else -> callUi.matchedContact?.displayName?.ifBlank { callUi.phoneNumber } ?: callUi.phoneNumber.ifBlank { "مكالمة نشطة" }
     }
     val stateLabel = when (callUi.callState) {
         Call.STATE_RINGING -> "يرن الآن"
         Call.STATE_DIALING, Call.STATE_CONNECTING -> "جاري الاتصال"
         Call.STATE_HOLDING -> "قيد الانتظار"
         else -> AppLockSecurity.formatDurationClock(callUi.elapsedSec)
+    }
+    val subtitleSuffix = buildString {
+        if (callUi.isRecording) append(" • جاري التسجيل")
+        if (callUi.secondaryCall != null && !maskDetails) {
+            append(" • مكالمة أخرى (${callUi.secondaryCall.displayName})")
+        }
+        if (!callUi.isRecording && callUi.secondaryCall == null) {
+            append(" • اضغط للعودة لشاشة المكالمة")
+        }
     }
 
     Surface(
@@ -1223,10 +1267,11 @@ private fun FloatingActiveCallBar(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = if (callUi.isRecording) "$stateLabel • جاري التسجيل" else "$stateLabel • اضغط للعودة لشاشة المكالمة",
+                    text = "$stateLabel$subtitleSuffix",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (callUi.isRecording) ErrorRed else WhatsAppGreen,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             IconButton(

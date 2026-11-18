@@ -155,6 +155,8 @@ fun ToolsSyncScreen(
     onPermissionsChanged: () -> Unit,
     onSignOut: () -> Unit,
     onRunAiBilingualEnrich: () -> Unit = {},
+    onSyncGoogleContactsPhotos: (String) -> Unit = {},
+    onSyncDevicePhotosOnly: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var showAddPayment by remember { mutableStateOf(false) }
@@ -227,6 +229,25 @@ fun ToolsSyncScreen(
                 }
             }.onFailure {
                 driveErrorMsg = "تعذر تفويض Google Drive: ${it.localizedMessage}"
+            }
+        }
+    }
+
+    val googlePhotosAuthLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { res ->
+        if (res.resultCode == Activity.RESULT_OK && res.data != null) {
+            runCatching {
+                val authRes = Identity.getAuthorizationClient(context).getAuthorizationResultFromIntent(res.data)
+                val token = authRes.accessToken
+                if (!token.isNullOrBlank()) {
+                    driveErrorMsg = null
+                    onSyncGoogleContactsPhotos(token)
+                } else {
+                    driveErrorMsg = "لم يرجع Google Contacts رمز وصول للصور"
+                }
+            }.onFailure {
+                driveErrorMsg = "تعذر تفويض Google Contacts: ${it.localizedMessage}"
             }
         }
     }
@@ -337,6 +358,8 @@ fun ToolsSyncScreen(
                     onImportBundledCsv = onImportBundledCsv,
                     onImportDevicePhonebook = onImportDevicePhonebook,
                     onScanGoogleDrive = onScanGoogleDrive,
+                    onSyncGoogleContactsPhotos = onSyncGoogleContactsPhotos,
+                    onSyncDevicePhotosOnly = onSyncDevicePhotosOnly,
                     onPullFromCloud = onPullFromCloud,
                     onExportJson = onExportJson,
                     onShareExport = onShareExport,
@@ -347,6 +370,7 @@ fun ToolsSyncScreen(
                     filePicker = filePicker,
                     readPhonebookPermLauncher = readPhonebookPermLauncher,
                     driveAuthLauncher = driveAuthLauncher,
+                    googlePhotosAuthLauncher = googlePhotosAuthLauncher,
                 )
             }
             SettingsSection.TEMPLATES -> {

@@ -3,7 +3,9 @@ package com.example.ui.screens
 import android.media.MediaPlayer
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,7 +70,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -82,6 +86,7 @@ import com.example.domain.model.PaymentTemplate
 import com.example.telecom.CallRecorderManager
 import com.example.telecom.CallRecordingItem
 import com.example.ui.components.InteractiveTranscriptPlayer
+import com.example.ui.components.TranscriptContextActionsSheet
 import com.example.ui.components.UnsavedNumberPaymentPopup
 import com.example.ui.theme.InstaPayPurple
 import com.example.util.PhoneUtils
@@ -100,6 +105,7 @@ private enum class VaultFilter(val labelAr: String) {
     HAS_ACTIONS("بها مهام"),
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun AiVaultScreen(
     transcripts: List<CallTranscriptRecord>,
@@ -126,6 +132,8 @@ fun AiVaultScreen(
     var playingRawPath by remember { mutableStateOf<String?>(null) }
     var rawMediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
     var paymentTargetPhone by remember { mutableStateOf<String?>(null) }
+    var contextTranscriptTarget by remember { mutableStateOf<CallTranscriptRecord?>(null) }
+    var contextRecordingTarget by remember { mutableStateOf<CallRecordingItem?>(null) }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -469,6 +477,7 @@ fun AiVaultScreen(
                         onMarkCalendarAdded = { onMarkCalendarAdded(record.id) },
                         onAnalyze = { onAnalyzeTranscript(record) },
                         onDelete = { onDeleteTranscript(record.id) },
+                        onLongClick = { contextTranscriptTarget = record },
                     )
                 }
 
@@ -482,10 +491,19 @@ fun AiVaultScreen(
                     }
                     items(unlinkedRecordings, key = { it.file.absolutePath }) { rec ->
                         val isPlaying = playingRawPath == rec.file.absolutePath
+                        val haptic = LocalHapticFeedback.current
                         Surface(
                             shape = RoundedCornerShape(16.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerLow,
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = { playRawAudio(rec.file) },
+                                    onLongClick = {
+                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        contextRecordingTarget = rec
+                                    },
+                                ),
                         ) {
                             Row(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -534,6 +552,26 @@ fun AiVaultScreen(
             phone = targetPhone,
             paymentTemplates = paymentTemplates,
             onDismiss = { paymentTargetPhone = null },
+        )
+    }
+
+    if (contextTranscriptTarget != null || contextRecordingTarget != null) {
+        TranscriptContextActionsSheet(
+            transcript = contextTranscriptTarget,
+            recordingItem = contextRecordingTarget,
+            onDismiss = {
+                contextTranscriptTarget = null
+                contextRecordingTarget = null
+            },
+            onOpenPlayer = { tr ->
+                stopRawPlayback()
+                activePlayerRecordId = tr.id
+            },
+            onReanalyzeTranscript = onAnalyzeTranscript,
+            onTranscribeRecording = onTranscribeRawRecording,
+            onSaveNotesToContact = onSaveCallNotes,
+            onDeleteTranscript = { tr -> onDeleteTranscript(tr.id) },
+            onDeleteRecording = onDeleteRawRecording,
         )
     }
 }
@@ -619,7 +657,7 @@ private fun SmartActionExecuteButton(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 private fun VaultTranscriptCard(
     record: CallTranscriptRecord,
@@ -633,8 +671,10 @@ private fun VaultTranscriptCard(
     onMarkCalendarAdded: () -> Unit,
     onAnalyze: () -> Unit,
     onDelete: () -> Unit,
+    onLongClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     var showSyncedTranscript by remember { mutableStateOf(false) }
 
     Card(
@@ -642,6 +682,13 @@ private fun VaultTranscriptCard(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         modifier = Modifier
             .fillMaxWidth()
+            .combinedClickable(
+                onClick = {},
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                },
+            )
             .testTag("vault_transcript_card_${record.id}"),
     ) {
         Column(
