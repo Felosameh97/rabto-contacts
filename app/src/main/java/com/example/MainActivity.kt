@@ -118,6 +118,7 @@ import com.example.ui.screens.ContactsScreen
 import com.example.ui.screens.KeypadScreen
 import com.example.ui.screens.RecentsScreen
 import com.example.ui.screens.ToolsSyncScreen
+import com.example.ui.screens.settings.SettingsSection
 import com.example.ui.theme.CalmPalette
 import com.example.ui.theme.ErrorRed
 import com.example.ui.theme.RabtaContactsTheme
@@ -391,6 +392,7 @@ private fun AuthenticatedMainScreen(
     var showLiveTranscriber by remember { mutableStateOf(false) }
     var showDuplicateMerge by remember { mutableStateOf(false) }
     var activeTranscriptModal by remember { mutableStateOf<CallTranscriptRecord?>(null) }
+    var activeSettingsSection by remember { mutableStateOf<SettingsSection?>(null) }
     var isAppUnlocked by remember(user.uid, appLockEnabled, appLockPinHash) {
         mutableStateOf(!appLockEnabled || appLockPinHash.isBlank())
     }
@@ -460,6 +462,10 @@ private fun AuthenticatedMainScreen(
     val isOnContacts = currentDest?.hasRoute(RouteContacts::class) == true
     val isPrimaryTab = !isOnCategories && !isOnSettings
 
+    LaunchedEffect(isOnSettings) {
+        if (!isOnSettings) activeSettingsSection = null
+    }
+
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val useRail = maxWidth >= 600.dp
 
@@ -470,7 +476,13 @@ private fun AuthenticatedMainScreen(
                     navigationIcon = {
                         if (!isPrimaryTab) {
                             IconButton(
-                                onClick = { navController.popBackStack() },
+                                onClick = {
+                                    if (isOnSettings && activeSettingsSection != null) {
+                                        activeSettingsSection = null
+                                    } else {
+                                        navController.popBackStack()
+                                    }
+                                },
                                 modifier = Modifier.testTag("topbar_back_btn"),
                             ) {
                                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "رجوع")
@@ -486,7 +498,7 @@ private fun AuthenticatedMainScreen(
                         Text(
                             text = when {
                                 isOnCategories -> stringResource(R.string.nav_categories)
-                                isOnSettings -> "الإعدادات والمزامنة"
+                                isOnSettings -> activeSettingsSection?.titleAr ?: "الإعدادات والمزامنة"
                                 else -> stringResource(R.string.app_name)
                             },
                             style = MaterialTheme.typography.titleLarge,
@@ -759,7 +771,13 @@ private fun AuthenticatedMainScreen(
                         }
 
                         composable<RouteSettings> {
-                            BackHandler { navController.popBackStack() }
+                            BackHandler {
+                                if (activeSettingsSection != null) {
+                                    activeSettingsSection = null
+                                } else {
+                                    navController.popBackStack()
+                                }
+                            }
                             ToolsSyncScreen(
                                 userEmail = user.email,
                                 totalContacts = totalCount,
@@ -773,6 +791,8 @@ private fun AuthenticatedMainScreen(
                                 autoRecordCalls = autoRecordCalls,
                                 callRecordings = callRecordings,
                                 isBusy = isBusy,
+                                selectedSection = activeSettingsSection,
+                                onSelectSection = { activeSettingsSection = it },
                                 showContactPhotos = showContactPhotos,
                                 callPhotoBackground = callPhotoBackground,
                                 strictPhonebookIsolation = strictIsolation,
