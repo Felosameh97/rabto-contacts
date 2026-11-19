@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.example.BuildConfig
+import com.example.R
 import com.google.firebase.FirebaseApp
 import com.google.firebase.appcheck.FirebaseAppCheck
 import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
@@ -79,21 +80,20 @@ fun configureAppCheck(context: Context, intent: Intent?) {
 
         // 4. Real user / colleague phone (or Release build) with no harness debug token:
         // Use reCAPTCHA Enterprise so Firebase does not reject an unregistered local Debug UUID.
-        val resId = context.resources.getIdentifier(RECAPTCHA_SITE_KEY_RES, "string", context.packageName)
-        if (resId != 0) {
-            val siteKey = context.getString(resId)
-            if (siteKey.isNotBlank()) {
-                FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
-                    RecaptchaAppCheckProviderFactory.getInstance(siteKey)
-                )
-                currentAppCheckMode = AppCheckActiveMode.RECAPTCHA_ENTERPRISE
-                Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
-                return
-            } else {
-                Log.e(TAG, "recaptcha_site_key resource string is blank.")
+        val siteKey = runCatching { context.getString(R.string.recaptcha_site_key).trim() }.getOrDefault("")
+            .ifBlank {
+                val resId = context.resources.getIdentifier(RECAPTCHA_SITE_KEY_RES, "string", context.packageName)
+                if (resId != 0) context.getString(resId).trim() else ""
             }
+        if (siteKey.isNotBlank()) {
+            FirebaseAppCheck.getInstance().installAppCheckProviderFactory(
+                RecaptchaAppCheckProviderFactory.getInstance(siteKey)
+            )
+            currentAppCheckMode = AppCheckActiveMode.RECAPTCHA_ENTERPRISE
+            Log.d(TAG, "RecaptchaAppCheckProviderFactory installed.")
+            return
         } else {
-            Log.e(TAG, "recaptcha_site_key string resource not found in package.")
+            Log.e(TAG, "recaptcha_site_key resource string is blank or missing.")
         }
 
         if (BuildConfig.DEBUG) {

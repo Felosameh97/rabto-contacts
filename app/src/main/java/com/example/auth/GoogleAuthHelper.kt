@@ -31,8 +31,10 @@ object GoogleAuthHelper {
     private const val TAG = "GoogleAuthHelper"
 
     private fun resolveWebClientId(context: Context): String {
+        val direct = runCatching { context.getString(R.string.default_web_client_id).trim() }.getOrDefault("")
+        if (direct.isNotBlank()) return direct
         val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-        return if (resId != 0) context.getString(resId) else ""
+        return if (resId != 0) context.getString(resId).trim() else ""
     }
 
     suspend fun attemptAutoSignIn(context: Context, auth: FirebaseAuth): FirebaseUser? {
@@ -73,6 +75,7 @@ object GoogleAuthHelper {
             ?: throw IllegalStateException("تعذر إتمام تسجيل الدخول عبر Google")
     }.recoverCatching { e ->
         if (e is GetCredentialCancellationException) {
+            Log.w(TAG, "Google Sign-In cancelled by user or credential configuration: ${e.message}", e)
             throw IllegalStateException("تم إلغاء تسجيل الدخول")
         }
         throw e
