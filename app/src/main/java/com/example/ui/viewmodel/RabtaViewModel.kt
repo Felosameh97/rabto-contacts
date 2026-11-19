@@ -229,6 +229,9 @@ class RabtaViewModel(
     val speedDialMap: StateFlow<Map<String, String>> = prefs.speedDialMapFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
 
+    val selectedAiModelId: StateFlow<String> = prefs.aiModelIdFlow
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), RabtaAiAssistant.DEFAULT_MODEL_ID)
+
     private var dialpadContactsCache: List<ContactRecord> = emptyList()
     private var dialpadCacheUpdatedMs: Long = 0L
 
@@ -319,6 +322,9 @@ class RabtaViewModel(
     private val _duplicateClusters = MutableStateFlow<List<List<ContactRecord>>>(emptyList())
     val duplicateClusters = _duplicateClusters.asStateFlow()
 
+    private val _aiDiagnosticStatus = MutableStateFlow<String?>(null)
+    val aiDiagnosticStatus = _aiDiagnosticStatus.asStateFlow()
+
     private var searchJob: Job? = null
     private var dialpadJob: Job? = null
     private var cloudUploadJob: Job? = null
@@ -342,6 +348,12 @@ class RabtaViewModel(
             loadCategoryLevel("")
             refreshRecordings()
             refreshCacheStats()
+
+            launch {
+                prefs.aiModelIdFlow.collect { modelId ->
+                    aiAssistant.activeModelId = modelId
+                }
+            }
 
             launch {
                 val savedRepo = prefs.githubRepoFlow.firstOrNull().orEmpty().trim()
@@ -411,6 +423,29 @@ class RabtaViewModel(
 
     fun setSimPreference(pref: SimPreference) {
         viewModelScope.launch { prefs.setSimPreference(pref) }
+    }
+
+    fun setSelectedAiModelId(modelId: String) {
+        val clean = modelId.trim().ifBlank { RabtaAiAssistant.DEFAULT_MODEL_ID }
+        aiAssistant.activeModelId = clean
+        _aiDiagnosticStatus.value = null
+        viewModelScope.launch {
+            prefs.setAiModelId(clean)
+            _statusMessage.value = "تم تعيين موديل Gemini النشط: $clean"
+        }
+    }
+
+    fun testGeminiConnection() {
+        viewModelScope.launch {
+            _aiDiagnosticStatus.value = "جاري اختبار الاتصال بالموديل ${aiAssistant.activeModelId}..."
+            aiAssistant.testConnection()
+                .onSuccess { ok ->
+                    _aiDiagnosticStatus.value = "✅ $ok"
+                }
+                .onFailure { err ->
+                    _aiDiagnosticStatus.value = "❌ ${err.localizedMessage ?: err.message ?: "تعذر الاتصال بـ Gemini"}"
+                }
+        }
     }
 
     fun setRecordingSourceMode(mode: RecordingSourceMode) {
@@ -1827,6 +1862,7 @@ class RabtaViewModel(
                 }
                 val mapRes = aiAssistant.classifyContactBatch(candidates)
                 var usedLocalFallback = false
+                val geminiErrMsg = mapRes.exceptionOrNull()?.localizedMessage
                 val assignments = mapRes.getOrElse {
                     usedLocalFallback = true
                     candidates.associate { c ->
@@ -1870,11 +1906,11 @@ class RabtaViewModel(
                 loadCategoryLevel(_currentCategoryPath.value)
                 _aiUiState.value = AiAssistantUiState.Success(
                     reply = if (usedLocalFallback) {
-                        "تم تصنيف ${updatedContacts.size} جهة اتصال بالمحرك المحلي الذكي (تجاوز رصيد Gemini)!"
+                        "تم تصنيف ${updatedContacts.size} جهة اتصال بالمحرك المحلي الذكي (تعذر Gemini: ${geminiErrMsg ?: "خطأ اتصال"})."
                     } else {
-                        "تم تصنيف ${updatedContacts.size} جهة اتصال بالذكاء الاصطناعي داخل ${catNodes.size} فئة متداخلة!"
+                        "تم تصنيف ${updatedContacts.size} جهة اتصال بموديل ${aiAssistant.activeModelId} داخل ${catNodes.size} فئة متداخلة!"
                     },
-                    actionBadge = if (usedLocalFallback) "تصنيف محلي ذكي" else "تصنيف Gemini AI",
+                    actionBadge = if (usedLocalFallback) "تصنيف محلي ذكي" else "تصنيف ${aiAssistant.activeModelId}",
                     matchedContacts = updatedContacts.take(10),
                 )
             } catch (e: CancellationException) {
@@ -1906,6 +1942,7 @@ class RabtaViewModel(
                 }
                 val enrichRes = aiAssistant.enrichContactsBilingualAndTags(candidates)
                 var usedLocalFallback = false
+                val geminiEnrichErr = enrichRes.exceptionOrNull()?.localizedMessage
                 val updated = ArrayList<ContactRecord>()
                 val map = enrichRes.getOrNull()
                 if (map != null) {
@@ -1961,11 +1998,11 @@ class RabtaViewModel(
                 }
                 _aiUiState.value = AiAssistantUiState.Success(
                     reply = if (usedLocalFallback) {
-                        "تم تحديث ${updated.size} جهة اتصال محلياً (English + Nickname عربي + Tags) بدون استهلاك رصيد Gemini!"
+                        "تم تحديث ${updated.size} جهة اتصال محلياً (تعذر Gemini: ${geminiEnrichErr ?: "خطأ اتصال"})."
                     } else {
-                        "تم تحويل ${updated.size} جهة اتصال لأسماء English مع حفظ الاسم العربي في Nickname وإضافة تاجز البحث!"
+                        "تم تحويل ${updated.size} جهة اتصال عبر ${aiAssistant.activeModelId} مع حفظ Nickname عربي وتاجز البحث!"
                     },
-                    actionBadge = if (usedLocalFallback) "ثنائي اللغة + Tags محلي" else "ثنائي اللغة + Tags AI",
+                    actionBadge = if (usedLocalFallback) "ثنائي اللغة محلي" else "${aiAssistant.activeModelId}",
                     matchedContacts = updated.take(10),
                 )
             } catch (e: CancellationException) {

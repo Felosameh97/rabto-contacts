@@ -232,6 +232,7 @@ class SyncPrefsDataStore(private val context: Context) {
     private val biometricLockKey = booleanPreferencesKey("biometric_lock_enabled")
     private val hideLockscreenDetailsKey = booleanPreferencesKey("hide_lockscreen_caller_details")
     private val speedDialMapKey = stringPreferencesKey("speed_dial_slots_v1")
+    private val aiModelIdKey = stringPreferencesKey("ai_model_id_v1")
 
     val githubRepoFlow: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[githubRepoKey] ?: ""
@@ -324,6 +325,10 @@ class SyncPrefsDataStore(private val context: Context) {
 
     val speedDialMapFlow: Flow<Map<String, String>> = context.dataStore.data.map { prefs ->
         parseSpeedDialRaw(prefs[speedDialMapKey].orEmpty())
+    }
+
+    val aiModelIdFlow: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[aiModelIdKey]?.trim()?.takeIf { it.isNotBlank() } ?: "gemini-3.8-flash"
     }
 
     suspend fun setGithubRepoSlug(slug: String) {
@@ -434,6 +439,13 @@ class SyncPrefsDataStore(private val context: Context) {
                 map[cleanDigit] = cleanPhone
             }
             prefs[speedDialMapKey] = map.entries.joinToString(TEMPLATE_DELIM) { "${it.key}=${it.value}" }
+        }
+    }
+
+    suspend fun setAiModelId(modelId: String) {
+        val clean = modelId.trim().ifBlank { "gemini-3.8-flash" }
+        context.dataStore.edit { prefs ->
+            prefs[aiModelIdKey] = clean
         }
     }
 

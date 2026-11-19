@@ -3,7 +3,10 @@ package com.example.ai
 import android.util.Log
 import com.example.domain.model.ContactRecord
 import com.google.firebase.Firebase
+import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.GenerateContentResponse
+import com.google.firebase.ai.type.GenerationConfig
 import com.google.firebase.ai.type.Schema
 import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
@@ -17,6 +20,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "RabtaAiAssistant"
 
@@ -45,7 +49,106 @@ data class AiCommandPlan(
     val replyAr: String = "",
 )
 
+data class GeminiModelOption(
+    val id: String,
+    val title: String,
+    val subtitleAr: String,
+)
+
 class RabtaAiAssistant {
+
+    @Volatile
+    var activeModelId: String = DEFAULT_MODEL_ID
+        set(value) {
+            field = value.trim().ifBlank { DEFAULT_MODEL_ID }
+        }
+
+    private val modelCache = ConcurrentHashMap<String, GenerativeModel>()
+
+    private fun getOrCreateModel(
+        taskKey: String,
+        modelName: String,
+        config: GenerationConfig? = null,
+    ): GenerativeModel {
+        val cleanName = modelName.trim().ifBlank { DEFAULT_MODEL_ID }
+        val cacheKey = "$taskKey|$cleanName"
+        return modelCache.getOrPut(cacheKey) {
+            if (config != null) {
+                Firebase.ai.generativeModel(
+                    modelName = cleanName,
+                    generationConfig = config,
+                )
+            } else {
+                Firebase.ai.generativeModel(modelName = cleanName)
+            }
+        }
+    }
+
+    private suspend fun executeWithModelFallback(
+        taskKey: String,
+        config: GenerationConfig? = null,
+        timeoutMs: Long = 45_000L,
+        preferredOverride: String? = null,
+        callBlock: suspend (GenerativeModel) -> GenerateContentResponse,
+    ): Pair<String, GenerateContentResponse> {
+        val candidates = candidateOrder(preferredOverride ?: activeModelId)
+        var lastError: Exception? = null
+        val tried = mutableListOf<String>()
+
+        for (candidate in candidates) {
+            tried += candidate
+            try {
+                val model = getOrCreateModel(taskKey, candidate, config)
+                val response = withTimeout(timeoutMs) {
+                    callBlock(model)
+                }
+                return candidate to response
+            } catch (e: CancellationException) {
+                if (e is TimeoutCancellationException) {
+                    lastError = e
+                    Log.e(TAG, "Model $candidate timed out after ${timeoutMs}ms", e)
+                    // Try next faster model if available
+                    continue
+                }
+                throw e
+            } catch (e: Exception) {
+                lastError = e
+                Log.e(TAG, "Model $candidate failed: ${e.message}", e)
+                if (!isRetryableWithAlternateModel(e)) {
+                    throw formatAiError(e, tried)
+                }
+            }
+        }
+
+        throw formatAiError(lastError ?: IllegalStateException("تعذر الاتصال بأي موديل Gemini"), tried)
+    }
+
+    suspend fun testConnection(modelOverride: String? = null): Result<String> {
+        val target = (modelOverride ?: activeModelId).trim().ifBlank { DEFAULT_MODEL_ID }
+        val startMs = System.currentTimeMillis()
+        return try {
+            val (usedModel, response) = executeWithModelFallback(
+                taskKey = "health_check",
+                config = generationConfig { temperature = 0.0f },
+                timeoutMs = 30_000L,
+                preferredOverride = target,
+            ) { model ->
+                model.generateContent("Reply with only one Arabic word: جاهز")
+            }
+            val elapsedMs = System.currentTimeMillis() - startMs
+            val text = response.text?.trim().orEmpty()
+            if (text.isBlank()) {
+                Result.failure(IllegalStateException("الموديل $usedModel استجاب برد فارغ"))
+            } else {
+                val switchedNote = if (usedModel != target) " (بدلاً من $target)" else ""
+                Result.success("متصل بنجاح بالموديل $usedModel$switchedNote في ${elapsedMs}ms — الرد: $text")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
     private val commandSchema = Schema.obj(
         properties = mapOf(
@@ -85,6 +188,14 @@ class RabtaAiAssistant {
         ),
     )
 
+    private val commandConfig by lazy {
+        generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = commandSchema
+            temperature = 0.2f
+        }
+    }
+
     private val classifySchema = Schema.obj(
         properties = mapOf(
             "assignments" to Schema.array(
@@ -101,37 +212,12 @@ class RabtaAiAssistant {
         )
     )
 
-    private val commandModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-flash-lite",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = commandSchema
-                temperature = 0.2f
-            },
-        )
-    }
-
-    private val commandFallbackModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = commandSchema
-                temperature = 0.2f
-            },
-        )
-    }
-
-    private val classifyModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-flash-lite",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = classifySchema
-                temperature = 0.15f
-            },
-        )
+    private val classifyConfig by lazy {
+        generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = classifySchema
+            temperature = 0.15f
+        }
     }
 
     suspend fun parseCommand(userText: String, availableTopCategories: List<String>): Result<AiCommandPlan> {
@@ -154,16 +240,12 @@ class RabtaAiAssistant {
                 appendLine("أرجع JSON مطابق للمخطط المطلوب فقط.")
             }
 
-            val response = withTimeout(45_000L) {
-                try {
-                    commandModel.generateContent(prompt)
-                } catch (primaryErr: Exception) {
-                    if (isQuotaOrRateError(primaryErr)) {
-                        commandFallbackModel.generateContent(prompt)
-                    } else {
-                        throw primaryErr
-                    }
-                }
+            val (_, response) = executeWithModelFallback(
+                taskKey = "command",
+                config = commandConfig,
+                timeoutMs = 45_000L,
+            ) { model ->
+                model.generateContent(prompt)
             }
             val jsonString = response.text
                 ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً"))
@@ -185,14 +267,11 @@ class RabtaAiAssistant {
                     replyAr = json.optString("replyAr", "تم تنفيذ طلبك").trim(),
                 )
             )
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini command timed out", e)
-            Result.failure(IllegalStateException("انتهت مهلة الاتصال بمساعد Gemini (60 ثانية). حاول مرة أخرى."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini command failed", e)
-            Result.failure(formatAiError(e))
+            Result.failure(e)
         }
     }
 
@@ -215,15 +294,12 @@ class RabtaAiAssistant {
         )
     )
 
-    private val enrichModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-flash-lite",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = bilingualTagSchema
-                temperature = 0.2f
-            },
-        )
+    private val enrichConfig by lazy {
+        generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = bilingualTagSchema
+            temperature = 0.2f
+        }
     }
 
     data class BilingualTagEnrichment(
@@ -259,8 +335,12 @@ class RabtaAiAssistant {
                 }
             }
 
-            val response = withTimeout(60_000L) {
-                enrichModel.generateContent(prompt)
+            val (_, response) = executeWithModelFallback(
+                taskKey = "enrich",
+                config = enrichConfig,
+                timeoutMs = 60_000L,
+            ) { model ->
+                model.generateContent(prompt)
             }
             val jsonString = response.text
                 ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً أثناء التحديث ثنائي اللغة"))
@@ -287,14 +367,11 @@ class RabtaAiAssistant {
                 }
             }
             Result.success(out)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini bilingual enrichment timed out", e)
-            Result.failure(IllegalStateException("انتهت مهلة التحديث الذكي. حاول مرة أخرى."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini bilingual enrichment failed", e)
-            Result.failure(formatAiError(e))
+            Result.failure(e)
         }
     }
 
@@ -321,8 +398,12 @@ class RabtaAiAssistant {
                 }
             }
 
-            val response = withTimeout(60_000L) {
-                classifyModel.generateContent(prompt)
+            val (_, response) = executeWithModelFallback(
+                taskKey = "classify",
+                config = classifyConfig,
+                timeoutMs = 60_000L,
+            ) { model ->
+                model.generateContent(prompt)
             }
             val jsonString = response.text
                 ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً أثناء التصنيف"))
@@ -346,14 +427,11 @@ class RabtaAiAssistant {
                 }
             }
             Result.success(resultMap)
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini classify timed out", e)
-            Result.failure(IllegalStateException("انتهت مهلة تصنيف Gemini. حاول مرة أخرى."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini classify failed", e)
-            Result.failure(formatAiError(e))
+            Result.failure(e)
         }
     }
 
@@ -424,26 +502,12 @@ class RabtaAiAssistant {
         ),
     )
 
-    private val callAnalysisModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.8-flash",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = callAnalysisSchema
-                temperature = 0.2f
-            },
-        )
-    }
-
-    private val callAnalysisFallbackModel by lazy {
-        Firebase.ai.generativeModel(
-            modelName = "gemini-3.5-flash-lite",
-            generationConfig = generationConfig {
-                responseMimeType = "application/json"
-                responseSchema = callAnalysisSchema
-                temperature = 0.2f
-            },
-        )
+    private val callAnalysisConfig by lazy {
+        generationConfig {
+            responseMimeType = "application/json"
+            responseSchema = callAnalysisSchema
+            temperature = 0.2f
+        }
     }
 
     suspend fun analyzeCallRecording(
@@ -483,16 +547,12 @@ class RabtaAiAssistant {
                 )
             }
 
-            val response = withTimeout(60_000L) {
-                try {
-                    callAnalysisModel.generateContent(prompt)
-                } catch (primaryErr: Exception) {
-                    if (isQuotaOrRateError(primaryErr)) {
-                        callAnalysisFallbackModel.generateContent(prompt)
-                    } else {
-                        throw primaryErr
-                    }
-                }
+            val (_, response) = executeWithModelFallback(
+                taskKey = "call_audio",
+                config = callAnalysisConfig,
+                timeoutMs = 60_000L,
+            ) { model ->
+                model.generateContent(prompt)
             }
             val jsonString = response.text
                 ?: return Result.failure(IllegalStateException("أرجع Gemini رداً فارغاً أثناء تحليل المكالمة"))
@@ -580,38 +640,86 @@ class RabtaAiAssistant {
                     suggestedCategory = json.optString("suggestedCategory", "").trim(),
                 )
             )
-        } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini audio transcription timed out", e)
-            Result.failure(IllegalStateException("انتهت مهلة تفريغ المكالمة (60 ثانية)."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Gemini audio transcription failed", e)
-            Result.failure(formatAiError(e))
+            Result.failure(e)
         }
     }
 
     companion object {
-        fun isQuotaOrRateError(e: Throwable): Boolean {
-            val raw = (e.localizedMessage ?: e.message.orEmpty()).lowercase(Locale.US)
-            return raw.contains("quota") || raw.contains("exceeded") || raw.contains("resource_exhausted") || raw.contains("429") || raw.contains("rate limit")
+        const val DEFAULT_MODEL_ID = "gemini-3.8-flash"
+        const val FAST_LITE_MODEL_ID = "gemini-3.5-flash-lite"
+        const val ARGON_MODEL_ID = "gemini-4-argon"
+
+        val PRESET_MODELS = listOf(
+            GeminiModelOption(
+                id = DEFAULT_MODEL_ID,
+                title = "Gemini 3.8 Flash",
+                subtitleAr = "الافتراضي • قوي ومتوازن ومتاح مجاناً",
+            ),
+            GeminiModelOption(
+                id = FAST_LITE_MODEL_ID,
+                title = "Gemini 3.5 Flash-Lite",
+                subtitleAr = "الأسرع للتصنيف الجماعي والأوامر (مجاني)",
+            ),
+            GeminiModelOption(
+                id = ARGON_MODEL_ID,
+                title = "Gemini 4 Argon",
+                subtitleAr = "أعلى دقة للتحليل المعقد (يتطلب Blaze)",
+            ),
+        )
+
+        fun candidateOrder(preferredModel: String): List<String> {
+            val clean = preferredModel.trim().ifBlank { DEFAULT_MODEL_ID }
+            return listOf(clean, DEFAULT_MODEL_ID, FAST_LITE_MODEL_ID).distinct()
         }
 
-        private fun formatAiError(e: Exception): Exception {
+        fun isQuotaOrRateError(e: Throwable): Boolean {
+            val raw = (e.localizedMessage ?: e.message.orEmpty()).lowercase(Locale.US)
+            return raw.contains("quota") ||
+                raw.contains("exceeded") ||
+                raw.contains("resource_exhausted") ||
+                raw.contains("429") ||
+                raw.contains("rate limit")
+        }
+
+        fun isRetryableWithAlternateModel(e: Throwable): Boolean {
+            if (isQuotaOrRateError(e)) return true
+            val raw = (e.localizedMessage ?: e.message.orEmpty()).lowercase(Locale.US)
+            return raw.contains("not found") ||
+                raw.contains("404") ||
+                raw.contains("not_found") ||
+                raw.contains("unsupported") ||
+                raw.contains("model") && (raw.contains("invalid") || raw.contains("exist") || raw.contains("available")) ||
+                raw.contains("503") ||
+                raw.contains("unavailable") ||
+                raw.contains("overloaded") ||
+                raw.contains("billing") ||
+                raw.contains("blaze")
+        }
+
+        private fun formatAiError(e: Exception, triedModels: List<String>): Exception {
+            if (e is TimeoutCancellationException) {
+                return IllegalStateException(
+                    "انتهت مهلة الاتصال بـ Gemini (الموديلات: ${triedModels.joinToString(" ← ")}). تأكد من الإنترنت وحاول مرة أخرى.",
+                    e,
+                )
+            }
             val raw = e.localizedMessage ?: e.message.orEmpty()
             val lower = raw.lowercase(Locale.US)
+            val modelNote = "الموديلات المجرّبة: ${triedModels.joinToString(" ← ")}"
             return when {
                 isQuotaOrRateError(e) -> IllegalStateException(
-                    "رصيد طلبات Gemini السحابي وصل للحد المجاني حالياً (Quota Exceeded).\n" +
-                        "• استخدم «التفريغ الصوتي المباشر» من الرئيسية أو شاشة المكالمة مجاناً وبدون Gemini.\n" +
-                        "• التصنيف الذكي والبحث والأوامر السريعة شغالة محلياً بدون أي رصيد.",
+                    "تم استنفاد حصة الطلبات ($modelNote).\nالسبب الفعلي: $raw",
                     e,
                 )
-                lower.contains("app check") || lower.contains("token is invalid") || lower.contains("403") -> IllegalStateException(
-                    "$raw\n\nتأكد من اتصال الإنترنت ووجود Google Play Services، أو أعد تشغيل التطبيق.",
+                lower.contains("app check") || lower.contains("token is invalid") || lower.contains("403") || lower.contains("attestation") -> IllegalStateException(
+                    "خطأ App Check / الصلاحية (403) ($modelNote).\nالسبب الفعلي: $raw\n\nافتح الإعدادات > المزامنة والذكاء > اختبار Gemini أو تأكد من اتصال Google Play Services.",
                     e,
                 )
-                else -> e
+                else -> IllegalStateException("$raw\n($modelNote)", e)
             }
         }
 

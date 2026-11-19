@@ -382,6 +382,8 @@ private fun AuthenticatedMainScreen(
     val statusMsg by viewModel.statusMessage.collectAsStateWithLifecycle()
     val pendingWaCapture by viewModel.pendingWhatsAppCapture.collectAsStateWithLifecycle()
     val speedDialMap by viewModel.speedDialMap.collectAsStateWithLifecycle()
+    val selectedAiModelId by viewModel.selectedAiModelId.collectAsStateWithLifecycle()
+    val aiDiagnosticStatus by viewModel.aiDiagnosticStatus.collectAsStateWithLifecycle()
 
     var editingContact by remember { mutableStateOf<ContactRecord?>(null) }
     var editorCategorySeed by remember { mutableStateOf("") }
@@ -894,6 +896,10 @@ private fun AuthenticatedMainScreen(
                                 },
                                 onSyncGoogleContactsPhotos = viewModel::syncGoogleContactsPhotos,
                                 onSyncDevicePhotosOnly = viewModel::syncDeviceContactsPhotosOnly,
+                                selectedAiModelId = selectedAiModelId,
+                                aiDiagnosticStatus = aiDiagnosticStatus,
+                                onSelectAiModelId = viewModel::setSelectedAiModelId,
+                                onTestGeminiConnection = viewModel::testGeminiConnection,
                             )
                         }
                         }
@@ -1008,6 +1014,10 @@ private fun AuthenticatedMainScreen(
     if (showAiSheet) {
         AiAssistantSheet(
             uiState = aiUiState,
+            selectedModelId = selectedAiModelId,
+            diagnosticStatus = aiDiagnosticStatus,
+            onSelectModelId = viewModel::setSelectedAiModelId,
+            onTestConnection = viewModel::testGeminiConnection,
             onRunCommand = { prompt ->
                 viewModel.runAiCommand(
                     userPrompt = prompt,

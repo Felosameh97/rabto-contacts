@@ -31,6 +31,7 @@ import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.NetworkCheck
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.Security
@@ -63,12 +64,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.example.ai.RabtaAiAssistant
 import com.example.auth.getAppCheckModeLabelAr
 import com.example.auth.getManualDebugToken
 import com.example.auth.getOrCreateLocalDebugUuid
 import com.example.auth.saveManualDebugToken
+import com.example.ui.theme.WhatsAppGreen
 import com.example.domain.model.CallTranscriptRecord
 import com.example.domain.model.LocalMediaCacheStats
 import com.example.domain.model.SyncEngineState
@@ -464,6 +468,10 @@ internal fun CallsRecordingSettingsPage(
 internal fun SyncCacheSettingsPage(
     syncEngineState: SyncEngineState,
     cacheStats: LocalMediaCacheStats,
+    selectedAiModelId: String = RabtaAiAssistant.DEFAULT_MODEL_ID,
+    aiDiagnosticStatus: String? = null,
+    onSelectAiModelId: (String) -> Unit = {},
+    onTestGeminiConnection: () -> Unit = {},
     onSyncNow: () -> Unit,
     onPurgeOrphanedCache: () -> Unit,
 ) {
@@ -471,6 +479,7 @@ internal fun SyncCacheSettingsPage(
     var manualTokenInput by remember { mutableStateOf(getManualDebugToken(context)) }
     var showTokenConfig by remember { mutableStateOf(manualTokenInput.isNotBlank()) }
     val localDebugUuid = remember { getOrCreateLocalDebugUuid(context) }
+    var customModelInput by remember(selectedAiModelId) { mutableStateOf(selectedAiModelId) }
 
     SettingsSubPageContainer {
         item {
@@ -541,14 +550,14 @@ internal fun SyncCacheSettingsPage(
             }
         }
 
-        // Firebase App Check & Gemini Diagnostics
+        // Gemini Models & Firebase App Check Diagnostics
         item {
             Card(
                 shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -556,16 +565,75 @@ internal fun SyncCacheSettingsPage(
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Icon(Icons.Rounded.Security, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            Text("حماية Gemini و App Check", style = MaterialTheme.typography.titleMedium)
+                            Text("موديلات Gemini و App Check", style = MaterialTheme.typography.titleMedium)
                         }
                         TextButton(onClick = { showTokenConfig = !showTokenConfig }) {
-                            Text(if (showTokenConfig) "إخفاء" else "خيارات متقدمة")
+                            Text(if (showTokenConfig) "إخفاء" else "خيارات App Check")
                         }
                     }
                     Text(
-                        "الوضع النشط: ${getAppCheckModeLabelAr()}",
-                        style = MaterialTheme.typography.bodySmall,
+                        "الموديل النشط حالياً: $selectedAiModelId",
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.primary,
+                    )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        RabtaAiAssistant.PRESET_MODELS.forEach { opt ->
+                            FilterChip(
+                                selected = selectedAiModelId.equals(opt.id, ignoreCase = true),
+                                onClick = {
+                                    customModelInput = opt.id
+                                    onSelectAiModelId(opt.id)
+                                },
+                                label = { Text(opt.title) },
+                            )
+                        }
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        OutlinedTextField(
+                            value = customModelInput,
+                            onValueChange = { customModelInput = it },
+                            label = { Text("موديل مخصص (Model ID)") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f).testTag("settings_ai_model_input"),
+                        )
+                        Button(
+                            onClick = {
+                                if (customModelInput.isNotBlank()) {
+                                    onSelectAiModelId(customModelInput.trim())
+                                }
+                            },
+                            modifier = Modifier.testTag("settings_apply_ai_model_btn"),
+                        ) {
+                            Text("تعيين")
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = onTestGeminiConnection,
+                        modifier = Modifier.fillMaxWidth().testTag("settings_test_gemini_btn"),
+                    ) {
+                        Icon(Icons.Rounded.NetworkCheck, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("اختبار اتصال Gemini الآن")
+                    }
+                    if (!aiDiagnosticStatus.isNullOrBlank()) {
+                        Text(
+                            text = aiDiagnosticStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (aiDiagnosticStatus.startsWith("✅")) WhatsAppGreen else MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Text(
+                        "وضع App Check: ${getAppCheckModeLabelAr()}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (showTokenConfig) {
                         Text(

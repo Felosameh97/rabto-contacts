@@ -157,6 +157,10 @@ fun ToolsSyncScreen(
     onRunAiBilingualEnrich: () -> Unit = {},
     onSyncGoogleContactsPhotos: (String) -> Unit = {},
     onSyncDevicePhotosOnly: () -> Unit = {},
+    selectedAiModelId: String = com.example.ai.RabtaAiAssistant.DEFAULT_MODEL_ID,
+    aiDiagnosticStatus: String? = null,
+    onSelectAiModelId: (String) -> Unit = {},
+    onTestGeminiConnection: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var showAddPayment by remember { mutableStateOf(false) }
@@ -344,6 +348,10 @@ fun ToolsSyncScreen(
                 SyncCacheSettingsPage(
                     syncEngineState = syncEngineState,
                     cacheStats = cacheStats,
+                    selectedAiModelId = selectedAiModelId,
+                    aiDiagnosticStatus = aiDiagnosticStatus,
+                    onSelectAiModelId = onSelectAiModelId,
+                    onTestGeminiConnection = onTestGeminiConnection,
                     onSyncNow = onSyncNow,
                     onPurgeOrphanedCache = onPurgeOrphanedCache,
                 )

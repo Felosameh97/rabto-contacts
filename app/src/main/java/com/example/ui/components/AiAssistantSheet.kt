@@ -5,6 +5,7 @@ import android.content.Intent
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -12,7 +13,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -26,7 +26,11 @@ import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.NetworkCheck
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -34,14 +38,17 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -52,7 +59,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.ai.RabtaAiAssistant
 import com.example.domain.model.ContactRecord
 import com.example.ui.theme.WhatsAppGreen
 import com.example.ui.viewmodel.AiAssistantUiState
@@ -62,6 +72,10 @@ import com.example.util.SystemIntents
 @Composable
 fun AiAssistantSheet(
     uiState: AiAssistantUiState,
+    selectedModelId: String = RabtaAiAssistant.DEFAULT_MODEL_ID,
+    diagnosticStatus: String? = null,
+    onSelectModelId: (String) -> Unit = {},
+    onTestConnection: () -> Unit = {},
     onRunCommand: (String) -> Unit,
     onRunBatchCategorize: () -> Unit,
     onRunBilingualEnrich: () -> Unit = {},
@@ -72,6 +86,8 @@ fun AiAssistantSheet(
     val context = LocalContext.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var promptText by remember { mutableStateOf("") }
+    var showModelPicker by remember { mutableStateOf(false) }
+    var customModelInput by remember(selectedModelId) { mutableStateOf(selectedModelId) }
 
     val voiceLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -102,14 +118,112 @@ fun AiAssistantSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 26.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                Text("مساعد رابطة الذكي (Gemini AI)", style = MaterialTheme.typography.titleLarge)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(Icons.Rounded.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Text("مساعد رابطة الذكي (Gemini)", style = MaterialTheme.typography.titleLarge)
+                }
+                TextButton(
+                    onClick = { showModelPicker = !showModelPicker },
+                    modifier = Modifier.testTag("ai_toggle_model_picker_btn"),
+                ) {
+                    Icon(Icons.Rounded.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(selectedModelId, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Icon(
+                        if (showModelPicker) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+
+            AnimatedVisibility(visible = showModelPicker) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "اختيار موديل Gemini عبر Firebase AI Logic (مع تبديل احتياطي تلقائي):",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            RabtaAiAssistant.PRESET_MODELS.forEach { opt ->
+                                FilterChip(
+                                    selected = selectedModelId.equals(opt.id, ignoreCase = true),
+                                    onClick = {
+                                        customModelInput = opt.id
+                                        onSelectModelId(opt.id)
+                                    },
+                                    label = { Text(opt.title, style = MaterialTheme.typography.labelSmall) },
+                                )
+                            }
+                        }
+                        val activeOpt = RabtaAiAssistant.PRESET_MODELS.firstOrNull {
+                            it.id.equals(selectedModelId, ignoreCase = true)
+                        }
+                        Text(
+                            text = activeOpt?.subtitleAr ?: "موديل مخصص: $selectedModelId",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            OutlinedTextField(
+                                value = customModelInput,
+                                onValueChange = { customModelInput = it },
+                                label = { Text("معرّف الموديل (Model ID)") },
+                                singleLine = true,
+                                modifier = Modifier.weight(1f).testTag("ai_custom_model_input"),
+                            )
+                            Button(
+                                onClick = {
+                                    if (customModelInput.isNotBlank()) {
+                                        onSelectModelId(customModelInput.trim())
+                                    }
+                                },
+                                modifier = Modifier.testTag("ai_apply_model_btn"),
+                            ) {
+                                Text("تطبيق")
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = onTestConnection,
+                            modifier = Modifier.fillMaxWidth().testTag("ai_test_connection_btn"),
+                        ) {
+                            Icon(Icons.Rounded.NetworkCheck, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("اختبار اتصال Gemini الآن")
+                        }
+                        if (!diagnosticStatus.isNullOrBlank()) {
+                            Text(
+                                text = diagnosticStatus,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium,
+                                color = if (diagnosticStatus.startsWith("✅")) WhatsAppGreen else MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
             }
 
             Text(
@@ -194,7 +308,7 @@ fun AiAssistantSheet(
                 is AiAssistantUiState.Idle -> Unit
                 is AiAssistantUiState.Loading -> {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text("جاري الفهم والتنفيذ عبر Gemini...", style = MaterialTheme.typography.bodySmall)
+                    Text("جاري الفهم والتنفيذ عبر $selectedModelId...", style = MaterialTheme.typography.bodySmall)
                 }
                 is AiAssistantUiState.Error -> {
                     Surface(
