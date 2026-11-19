@@ -49,80 +49,137 @@ object VCardUtils {
     fun exportAll(contacts: List<ContactRecord>): String =
         contacts.joinToString("\n") { toVCard(it).trimEnd() }
 
-    fun parseVCards(rawText: String): List<ContactRecord> {
-        val normalized = rawText.replace("\r\n ", "").replace("\n ", "")
-        val blocks = normalized.split(Regex("(?=BEGIN:VCARD)", RegexOption.IGNORE_CASE))
-            .map { it.trim() }
-            .filter { it.contains("BEGIN:VCARD", ignoreCase = true) }
+    fun parseVCards(rawText: String, skipEnrich: Boolean = false): List<ContactRecord> {
+        return parseVCardStream(rawText.reader().buffered(), skipEnrich = skipEnrich)
+    }
 
-        return blocks.mapNotNull { block ->
-            var fn = ""
-            var nickname: String? = null
-            val phones = mutableListOf<String>()
-            val emails = mutableListOf<String>()
-            var org: String? = null
-            var title: String? = null
-            var address: String? = null
-            var note: String? = null
-            var website: String? = null
-            val categories = mutableListOf<String>()
-            var lat: Double? = null
-            var lng: Double? = null
+    /**
+     * Streams arbitrary-size .vcf files line-by-line (supporting RFC folded lines) without holding
+     * regex-split copies in memory, generating deterministic IDs for idempotent re-imports.
+     */
+    fun parseVCardStream(reader: java.io.BufferedReader, skipEnrich: Boolean = false): List<ContactRecord> {
+        val results = ArrayList<ContactRecord>()
+        var inCard = false
+        var fn = ""
+        var nickname: String? = null
+        val phones = LinkedHashSet<String>()
+        val emails = LinkedHashSet<String>()
+        var org: String? = null
+        var title: String? = null
+        var address: String? = null
+        var note: String? = null
+        var website: String? = null
+        val categories = LinkedHashSet<String>()
+        var lat: Double? = null
+        var lng: Double? = null
 
-            for (line in block.lines()) {
-                val colonIdx = line.indexOf(':')
-                if (colonIdx <= 0) continue
-                val key = line.substring(0, colonIdx).uppercase()
-                val value = line.substring(colonIdx + 1).trim()
-                if (value.isBlank()) continue
+        fun flushCard() {
+            if (fn.isBlank() && phones.isEmpty() && emails.isEmpty()) return
+            val phoneList = phones.take(10)
+            val emailList = emails.take(5)
+            val resolvedName = fn.ifBlank { phoneList.firstOrNull().orEmpty() }.ifBlank { emailList.firstOrNull().orEmpty() }
+            val geo = if (lat == null || lng == null) EgyptGeoLookup.inferLocation(address, resolvedName, note) else null
+            val base = ContactRecord(
+                id = ContactDeduplicator.deterministicContactId(phoneList, emailList, resolvedName),
+                displayName = resolvedName.take(200),
+                nickname = nickname,
+                primaryPhone = phoneList.firstOrNull().orEmpty(),
+                phones = phoneList,
+                emails = emailList,
+                categoryPaths = categories.take(15),
+                organization = org,
+                jobTitle = title,
+                notes = note,
+                address = address,
+                district = geo?.key,
+                latitude = lat ?: geo?.lat,
+                longitude = lng ?: geo?.lng,
+                website = website,
+            )
+            results += if (skipEnrich) base else ContactDeduplicator.enrichSingleContact(base)
+        }
 
-                when {
-                    key == "FN" -> fn = unescapeVCard(value)
-                    key.startsWith("NICKNAME") -> nickname = unescapeVCard(value)
-                    key.startsWith("N") && fn.isBlank() -> fn = value.split(";").filter { it.isNotBlank() }.joinToString(" ")
-                    key.startsWith("TEL") -> {
-                        val norm = PhoneUtils.normalizePhone(value)
-                        if (norm.isNotBlank()) phones += norm
-                    }
-                    key.startsWith("EMAIL") -> if (value.contains("@")) emails += value
-                    key.startsWith("ORG") -> org = unescapeVCard(value.replace(";", " ").trim())
-                    key.startsWith("TITLE") -> title = unescapeVCard(value)
-                    key.startsWith("ADR") -> address = value.split(";").filter { it.isNotBlank() }.joinToString(", ")
-                    key.startsWith("NOTE") -> note = unescapeVCard(value)
-                    key.startsWith("URL") -> website = value
-                    key.startsWith("CATEGORIES") -> {
-                        value.split(",").map { it.trim() }.filter { it.isNotBlank() }.forEach { categories += it }
-                    }
-                    key.startsWith("GEO") -> {
-                        val parts = value.split(";", ",")
-                        lat = parts.getOrNull(0)?.toDoubleOrNull()
-                        lng = parts.getOrNull(1)?.toDoubleOrNull()
-                    }
+        fun resetCard() {
+            fn = ""
+            nickname = null
+            phones.clear()
+            emails.clear()
+            org = null
+            title = null
+            address = null
+            note = null
+            website = null
+            categories.clear()
+            lat = null
+            lng = null
+        }
+
+        fun processLogicalLine(line: String) {
+            val trimmed = line.trim()
+            if (trimmed.equals("BEGIN:VCARD", ignoreCase = true)) {
+                resetCard()
+                inCard = true
+                return
+            }
+            if (trimmed.equals("END:VCARD", ignoreCase = true)) {
+                if (inCard) flushCard()
+                inCard = false
+                resetCard()
+                return
+            }
+            if (!inCard) return
+
+            val colonIdx = line.indexOf(':')
+            if (colonIdx <= 0) return
+            val key = line.substring(0, colonIdx).uppercase()
+            val value = line.substring(colonIdx + 1).trim()
+            if (value.isBlank()) return
+
+            when {
+                key == "FN" || key.startsWith("FN;") -> fn = unescapeVCard(value)
+                key.startsWith("NICKNAME") -> nickname = unescapeVCard(value)
+                (key == "N" || key.startsWith("N;")) && fn.isBlank() -> {
+                    fn = value.split(";").filter { it.isNotBlank() }.joinToString(" ")
+                }
+                key.startsWith("TEL") -> {
+                    val norm = PhoneUtils.normalizePhone(value)
+                    if (norm.isNotBlank()) phones += norm
+                }
+                key.startsWith("EMAIL") -> if (value.contains("@")) emails += value
+                key.startsWith("ORG") -> org = unescapeVCard(value.replace(";", " ").trim())
+                key.startsWith("TITLE") -> title = unescapeVCard(value)
+                key.startsWith("ADR") -> address = value.split(";").filter { it.isNotBlank() }.joinToString(", ")
+                key.startsWith("NOTE") -> note = unescapeVCard(value)
+                key.startsWith("URL") -> website = value
+                key.startsWith("CATEGORIES") -> {
+                    value.split(",").map { it.trim() }.filter { it.isNotBlank() }.forEach { categories += it }
+                }
+                key.startsWith("GEO") -> {
+                    val parts = value.split(";", ",")
+                    lat = parts.getOrNull(0)?.toDoubleOrNull()
+                    lng = parts.getOrNull(1)?.toDoubleOrNull()
                 }
             }
-
-            if (fn.isBlank() && phones.isEmpty() && emails.isEmpty()) return@mapNotNull null
-            val geo = if (lat == null || lng == null) EgyptGeoLookup.inferLocation(address, fn, note) else null
-            ContactDeduplicator.enrichSingleContact(
-                ContactRecord(
-                    id = "c_" + UUID.randomUUID().toString().replace("-", "").take(16),
-                    displayName = fn.ifBlank { phones.firstOrNull().orEmpty() }.ifBlank { emails.firstOrNull().orEmpty() },
-                    nickname = nickname,
-                    primaryPhone = phones.firstOrNull().orEmpty(),
-                    phones = phones.distinct().take(10),
-                    emails = emails.distinct().take(5),
-                    categoryPaths = categories.distinct().take(15),
-                    organization = org,
-                    jobTitle = title,
-                    notes = note,
-                    address = address,
-                    district = geo?.key,
-                    latitude = lat ?: geo?.lat,
-                    longitude = lng ?: geo?.lng,
-                    website = website,
-                )
-            )
         }
+
+        val pendingLine = StringBuilder()
+        while (true) {
+            val raw = reader.readLine() ?: break
+            if ((raw.startsWith(" ") || raw.startsWith("\t")) && pendingLine.isNotEmpty()) {
+                pendingLine.append(raw.substring(1))
+            } else {
+                if (pendingLine.isNotEmpty()) {
+                    processLogicalLine(pendingLine.toString())
+                    pendingLine.setLength(0)
+                }
+                pendingLine.append(raw)
+            }
+        }
+        if (pendingLine.isNotEmpty()) {
+            processLogicalLine(pendingLine.toString())
+        }
+        if (inCard) flushCard()
+        return results
     }
 
     /**

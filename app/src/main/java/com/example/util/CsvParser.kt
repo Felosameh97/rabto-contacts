@@ -1,11 +1,11 @@
 package com.example.util
 
 import com.example.domain.model.ContactRecord
+import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
-import java.util.UUID
 
 object CsvParser {
 
@@ -15,8 +15,53 @@ object CsvParser {
         val categoryPaths: Set<String>,
     )
 
-    fun parseStream(inputStream: InputStream, defaultCategory: String? = null): ParsedDataset {
-        val reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8))
+    /**
+     * Streams any CSV, TSV, semicolon-delimited Excel export, vCard (.vcf), or plain text phone list
+     * directly from an InputStream without duplicating huge files in RAM.
+     */
+    fun parseStreamAuto(
+        inputStream: InputStream,
+        sourceTitle: String? = null,
+        defaultCategory: String? = null,
+        skipEnrich: Boolean = false,
+    ): ParsedDataset {
+        val buffered = BufferedInputStream(inputStream, 32 * 1024)
+        buffered.mark(8192)
+        val headerProbe = ByteArray(4096)
+        val probeLen = buffered.read(headerProbe).coerceAtLeast(0)
+        buffered.reset()
+        val headText = String(headerProbe, 0, probeLen, StandardCharsets.UTF_8)
+
+        if (headText.contains("BEGIN:VCARD", ignoreCase = true)) {
+            val reader = BufferedReader(InputStreamReader(buffered, StandardCharsets.UTF_8), 32 * 1024)
+            val vcards = VCardUtils.parseVCardStream(reader, skipEnrich = skipEnrich)
+            val cats = LinkedHashSet<String>()
+            val catLabel = defaultCategory?.takeIf { it.isNotBlank() }
+                ?: sourceTitle?.takeIf { it.isNotBlank() }?.let { "مستورد > $it" }
+            val tagged = if (catLabel != null) {
+                addHierarchySegments(catLabel, cats)
+                vcards.map { c ->
+                    c.categoryPaths.forEach { addHierarchySegments(it, cats) }
+                    c.copy(categoryPaths = (c.categoryPaths + catLabel).distinct())
+                }
+            } else {
+                vcards.forEach { c -> c.categoryPaths.forEach { addHierarchySegments(it, cats) } }
+                vcards
+            }
+            return ParsedDataset(tagged, 0, cats)
+        }
+
+        val resolvedDefaultCat = defaultCategory
+            ?: sourceTitle?.takeIf { it.isNotBlank() }?.let { "مستورد > $it" }
+        return parseStream(buffered, defaultCategory = resolvedDefaultCat, skipEnrich = skipEnrich)
+    }
+
+    fun parseStream(
+        inputStream: InputStream,
+        defaultCategory: String? = null,
+        skipEnrich: Boolean = false,
+    ): ParsedDataset {
+        val reader = BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8), 32 * 1024)
         val rows = readAllCsvRows(reader)
         if (rows.isEmpty()) return ParsedDataset(emptyList(), 0, emptySet())
 
@@ -28,9 +73,9 @@ object CsvParser {
             headerIndex.containsKey("labels")
 
         return if (isGoogleContacts) {
-            parseGoogleContactsRows(headers, headerIndex, rows.drop(1), defaultCategory)
+            parseGoogleContactsRows(headers, headerIndex, rows.drop(1), defaultCategory, skipEnrich)
         } else {
-            parseGenericRows(headers, rows.drop(1), defaultCategory)
+            parseGenericRows(headers, rows, defaultCategory, skipEnrich)
         }
     }
 
@@ -69,7 +114,7 @@ object CsvParser {
         val phoneRegex = Regex("""(\+?\d[\d\s\-().]{7,17}\d)""")
 
         for (line in trimmed.lineSequence()) {
-            val cleanLine = line.trim()
+            val cleanLine = PhoneUtils.normalizeDigits(line).trim()
             if (cleanLine.isBlank()) continue
             val matches = phoneRegex.findAll(cleanLine)
                 .map { PhoneUtils.normalizePhone(it.value) }
@@ -125,6 +170,7 @@ object CsvParser {
         headerIndex: Map<String, Int>,
         dataRows: List<List<String>>,
         defaultCategory: String?,
+        skipEnrich: Boolean,
     ): ParsedDataset {
         val phoneIndices = headers.withIndex()
             .filter { it.value.startsWith("Phone", ignoreCase = true) && it.value.endsWith("Value", ignoreCase = true) }
@@ -209,28 +255,27 @@ object CsvParser {
             val geoMatch = EgyptGeoLookup.inferLocation(address, rawName, notes, rawLabels.joinToString(" "))
                 ?: phones.firstOrNull()?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
             val contactId = ContactDeduplicator.deterministicContactId(phones, emails, rawName)
-            val enriched = ContactDeduplicator.enrichSingleContact(
-                ContactRecord(
-                    id = contactId,
-                    displayName = rawName.take(200),
-                    nickname = nickname.ifBlank { null },
-                    primaryPhone = phones.firstOrNull().orEmpty(),
-                    phones = phones,
-                    emails = emails,
-                    categoryPaths = nestedCategories,
-                    organization = org.ifBlank { null },
-                    jobTitle = title.ifBlank { null },
-                    notes = notes.ifBlank { null },
-                    address = address,
-                    district = geoMatch?.key,
-                    latitude = geoMatch?.lat,
-                    longitude = geoMatch?.lng,
-                    website = website,
-                    isFavorite = isStarred,
-                )
+            val baseRecord = ContactRecord(
+                id = contactId,
+                displayName = rawName.take(200),
+                nickname = nickname.ifBlank { null },
+                primaryPhone = phones.firstOrNull().orEmpty(),
+                phones = phones,
+                emails = emails,
+                categoryPaths = nestedCategories,
+                organization = org.ifBlank { null },
+                jobTitle = title.ifBlank { null },
+                notes = notes.ifBlank { null },
+                address = address,
+                district = geoMatch?.key,
+                latitude = geoMatch?.lat,
+                longitude = geoMatch?.lng,
+                website = website,
+                isFavorite = isStarred,
             )
-            enriched.categoryPaths.forEach { addHierarchySegments(it, categories) }
-            contacts += enriched
+            val finalRecord = if (skipEnrich) baseRecord else ContactDeduplicator.enrichSingleContact(baseRecord)
+            finalRecord.categoryPaths.forEach { addHierarchySegments(it, categories) }
+            contacts += finalRecord
         }
 
         return ParsedDataset(contacts, skipped, categories)
@@ -238,51 +283,82 @@ object CsvParser {
 
     private fun parseGenericRows(
         headers: List<String>,
-        dataRows: List<List<String>>,
+        allRows: List<List<String>>,
         defaultCategory: String?,
+        skipEnrich: Boolean,
     ): ParsedDataset {
-        val nameCol = findCol(headers, listOf("name", "full name", "الاسم", "displayname", "student"))
-        val phoneCol = findCol(headers, listOf("phone", "mobile", "tel", "رقم", "الهاتف", "الموبايل", "واتساب"))
+        val nameCol = findCol(headers, listOf("name", "full name", "الاسم", "اسم", "displayname", "student", "client", "عميل"))
+        val phoneCol = findCol(headers, listOf("phone", "mobile", "tel", "number", "رقم", "الهاتف", "الموبايل", "واتساب", "تليفون"))
         val emailCol = findCol(headers, listOf("email address", "email", "e-mail", "البريد", "الإيميل"))
         val linkCol = findCol(headers, listOf("link", "whatsapp", "wa.me"))
-        val deptCol = findCol(headers, listOf("القسم", "department", "category", "فئة"))
+        val deptCol = findCol(headers, listOf("القسم", "department", "category", "فئة", "تصنيف", "group", "label"))
         val batchCol = findCol(headers, listOf("دفعة", "batch", "year"))
         val idCol = findCol(headers, listOf("id", "id 🪪"))
+
+        // Support headerless CSV/TXT files where row 0 already contains a phone number
+        val firstRowLooksLikeData = nameCol == null && phoneCol == null && emailCol == null &&
+            headers.any { PhoneUtils.extractPhonesFromSharedText(it).isNotEmpty() }
+        val dataRows = if (firstRowLooksLikeData) allRows else allRows.drop(1)
 
         val contacts = ArrayList<ContactRecord>(dataRows.size)
         val categories = LinkedHashSet<String>()
         var skipped = 0
+        val waRegex = Regex("""wa\.me/(\d{8,15})""")
+        val emailRegex = Regex("""[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}""")
 
         for (row in dataRows) {
-            val rawName = nameCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
+            var rawName = nameCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
             val rawPhone = phoneCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
-            val rawEmail = emailCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
+            var rawEmail = emailCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
             val rawLink = linkCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
             val dept = deptCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
             val batch = batchCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
             val extId = idCol?.let { row.getOrNull(it)?.trim() }.orEmpty()
 
-            val linkPhone = Regex("""wa\.me/(\d{8,15})""").find(rawLink)?.groupValues?.getOrNull(1).orEmpty()
-            // Also scan entire row if neither primary phoneCol nor link had a valid phone
-            val fallbackRowPhone = if (rawPhone.isBlank() && linkPhone.isBlank()) {
-                row.firstNotNullOfOrNull { cell ->
-                    PhoneUtils.extractPhonesFromSharedText(cell).firstOrNull()
-                }.orEmpty()
-            } else ""
+            val linkPhone = if (rawLink.isNotBlank()) waRegex.find(rawLink)?.groupValues?.getOrNull(1).orEmpty() else ""
+            val rowPhones = LinkedHashSet<String>()
+            if (rawPhone.isNotBlank()) {
+                val n = PhoneUtils.normalizePhone(rawPhone)
+                if (n.length >= 6) rowPhones += n
+                else PhoneUtils.extractPhonesFromSharedText(rawPhone).forEach { rowPhones += it }
+            }
+            if (linkPhone.isNotBlank()) {
+                val n = PhoneUtils.normalizePhone(linkPhone)
+                if (n.length >= 6) rowPhones += n
+            }
+            if (rowPhones.isEmpty()) {
+                for (cell in row) {
+                    if (cell.isBlank()) continue
+                    PhoneUtils.extractPhonesFromSharedText(cell).forEach { rowPhones += it }
+                }
+            }
+            if (rawEmail.isBlank()) {
+                rawEmail = row.firstNotNullOfOrNull { cell -> emailRegex.find(cell)?.value }.orEmpty()
+            }
 
-            val normalizedPhone = PhoneUtils.normalizePhone(
-                rawPhone.ifBlank { linkPhone }.ifBlank { fallbackRowPhone }
-            )
-            if (normalizedPhone.isBlank() && rawEmail.isBlank()) {
+            val phonesList = rowPhones.take(10)
+            val normalizedPhone = phonesList.firstOrNull().orEmpty()
+            if (normalizedPhone.isBlank() && !rawEmail.contains("@")) {
                 skipped++
                 continue
+            }
+
+            if (rawName.isBlank()) {
+                rawName = row.firstOrNull { cell ->
+                    val trimmed = cell.trim()
+                    trimmed.length >= 2 &&
+                        !trimmed.contains("@") &&
+                        !trimmed.startsWith("http", ignoreCase = true) &&
+                        PhoneUtils.extractPhonesFromSharedText(trimmed).isEmpty() &&
+                        trimmed.any { it.isLetter() }
+                }?.trim().orEmpty()
             }
 
             val displayName = rawName.ifBlank {
                 if (extId.isNotBlank() && extId != ".") "طالب $extId" else normalizedPhone.ifBlank { rawEmail }
             }
 
-            val base = defaultCategory ?: "الجامعة > الأكاديمية (EAEAT)"
+            val base = defaultCategory ?: "مستورد > ملف عام"
             val catParts = buildList {
                 add(base)
                 if (batch.isNotBlank() && batch != "0") add("دفعة $batch")
@@ -290,11 +366,12 @@ object CsvParser {
             }
             val fullPath = catParts.joinToString(" > ")
 
+            val emailsList = listOfNotNull(rawEmail.takeIf { it.contains("@") })
             val (nestedCats, starred) = SmartCategoryEngine.normalizeAndNestLabels(
                 rawLabels = listOf(fullPath),
                 displayName = displayName,
-                phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
-                emails = listOfNotNull(rawEmail.takeIf { it.contains("@") }),
+                phones = phonesList,
+                emails = emailsList,
                 organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
                 jobTitle = null,
                 notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
@@ -302,29 +379,25 @@ object CsvParser {
             )
             nestedCats.forEach { addHierarchySegments(it, categories) }
 
-            val geo = EgyptGeoLookup.inferLocation(displayName, fullPath, "eaeat")
-            val enriched = ContactDeduplicator.enrichSingleContact(
-                ContactRecord(
-                    id = ContactDeduplicator.deterministicContactId(
-                        listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
-                        listOfNotNull(rawEmail.takeIf { it.contains("@") }),
-                        displayName,
-                    ),
-                    displayName = displayName.take(200),
-                    primaryPhone = normalizedPhone,
-                    phones = listOfNotNull(normalizedPhone.takeIf { it.isNotBlank() }),
-                    emails = listOfNotNull(rawEmail.takeIf { it.contains("@") }),
-                    categoryPaths = nestedCats,
-                    organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
-                    notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
-                    district = geo?.key,
-                    latitude = geo?.lat,
-                    longitude = geo?.lng,
-                    isFavorite = starred,
-                )
+            val geo = EgyptGeoLookup.inferLocation(displayName, fullPath)
+                ?: normalizedPhone.takeIf { it.isNotBlank() }?.let { EgyptGeoLookup.inferLocationFromPhone(it) }
+            val baseRecord = ContactRecord(
+                id = ContactDeduplicator.deterministicContactId(phonesList, emailsList, displayName),
+                displayName = displayName.take(200),
+                primaryPhone = normalizedPhone,
+                phones = phonesList,
+                emails = emailsList,
+                categoryPaths = nestedCats,
+                organization = if (base.contains("EAEAT")) "EAEAT Academy" else null,
+                notes = if (extId.isNotBlank() && extId != ".") "ID: $extId" else null,
+                district = geo?.key,
+                latitude = geo?.lat,
+                longitude = geo?.lng,
+                isFavorite = starred,
             )
-            enriched.categoryPaths.forEach { addHierarchySegments(it, categories) }
-            contacts += enriched
+            val finalRecord = if (skipEnrich) baseRecord else ContactDeduplicator.enrichSingleContact(baseRecord)
+            finalRecord.categoryPaths.forEach { addHierarchySegments(it, categories) }
+            contacts += finalRecord
         }
         return ParsedDataset(contacts, skipped, categories)
     }
@@ -357,14 +430,39 @@ object CsvParser {
         }
     }
 
+    private fun detectDelimiter(sampleLine: String): Char {
+        var commas = 0
+        var semicolons = 0
+        var tabs = 0
+        var inQuotes = false
+        for (c in sampleLine) {
+            when {
+                c == '"' -> inQuotes = !inQuotes
+                !inQuotes && c == ',' -> commas++
+                !inQuotes && c == ';' -> semicolons++
+                !inQuotes && c == '\t' -> tabs++
+            }
+        }
+        return when {
+            tabs > commas && tabs > semicolons -> '\t'
+            semicolons > commas && semicolons >= tabs -> ';'
+            else -> ','
+        }
+    }
+
     private fun readAllCsvRows(reader: BufferedReader): List<List<String>> {
         val rows = ArrayList<List<String>>()
         val currentRow = ArrayList<String>()
         val field = StringBuilder()
         var inQuotes = false
+        var delimiter: Char? = null
 
         while (true) {
             val line = reader.readLine() ?: break
+            if (delimiter == null && line.isNotBlank()) {
+                delimiter = detectDelimiter(line)
+            }
+            val delim = delimiter ?: ','
             var i = 0
             while (i < line.length) {
                 val c = line[i]
@@ -382,7 +480,7 @@ object CsvParser {
                 } else {
                     when (c) {
                         '"' -> inQuotes = true
-                        ',' -> {
+                        delim -> {
                             currentRow.add(field.toString())
                             field.setLength(0)
                         }

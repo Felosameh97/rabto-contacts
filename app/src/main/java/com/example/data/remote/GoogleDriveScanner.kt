@@ -29,7 +29,7 @@ object GoogleDriveScanner {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
     suspend fun requestDriveAuthorization(activity: Activity): Result<AuthorizationResult> {
@@ -98,7 +98,7 @@ object GoogleDriveScanner {
                 val fileName = f.optString("name", "Drive File")
                 val mimeType = f.optString("mimeType", "")
                 val sizeBytes = f.optString("size").toLongOrNull() ?: 0L
-                if (sizeBytes > 6_000_000L) continue
+                if (sizeBytes > 30_000_000L) continue
 
                 val downloadUrl = if (mimeType == "application/vnd.google-apps.spreadsheet") {
                     "https://www.googleapis.com/drive/v3/files/$fileId/export?mimeType=text%2Fcsv"
@@ -106,23 +106,28 @@ object GoogleDriveScanner {
                     "https://www.googleapis.com/drive/v3/files/$fileId?alt=media"
                 }
 
-                val content = runCatching {
+                val parsed = runCatching {
                     val req = Request.Builder()
                         .url(downloadUrl)
                         .addHeader("Authorization", "Bearer $accessToken")
                         .build()
                     client.newCall(req).execute().use { resp ->
-                        if (resp.isSuccessful) resp.body?.string().orEmpty() else ""
+                        if (!resp.isSuccessful) return@use null
+                        val stream = resp.body?.byteStream() ?: return@use null
+                        val title = fileName.substringBeforeLast('.')
+                        CsvParser.parseStreamAuto(
+                            inputStream = stream,
+                            sourceTitle = title,
+                            defaultCategory = "Google Drive > $title",
+                            skipEnrich = true,
+                        )
                     }
-                }.getOrDefault("")
+                }.getOrNull()
 
-                if (content.isNotBlank()) {
-                    val parsed = CsvParser.parseArbitrarySheetOrText(content, fileName.substringBeforeLast('.'))
-                    if (parsed.contacts.isNotEmpty()) {
-                        scannedTitles += "$fileName (${parsed.contacts.size})"
-                        allContacts += parsed.contacts
-                        allCategories += parsed.categoryPaths
-                    }
+                if (parsed != null && parsed.contacts.isNotEmpty()) {
+                    scannedTitles += "$fileName (${parsed.contacts.size})"
+                    allContacts += parsed.contacts
+                    allCategories += parsed.categoryPaths
                 }
             }
 

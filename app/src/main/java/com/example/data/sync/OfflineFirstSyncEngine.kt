@@ -36,6 +36,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -83,27 +84,62 @@ class OfflineFirstSyncEngine(
     private val _isOnline = MutableStateFlow(checkCurrentConnectivity())
     private val _isSyncing = MutableStateFlow(false)
     private val _lastError = MutableStateFlow<String?>(null)
+    private val _syncedInCurrentRun = MutableStateFlow(0)
+    private val _totalInCurrentRun = MutableStateFlow(0)
+    private val _progressMessage = MutableStateFlow<String?>(null)
 
-    val syncState: StateFlow<SyncEngineState> = combine(
+    private data class SyncProgressSnapshot(
+        val syncedInRun: Int,
+        val totalInRun: Int,
+        val failedCount: Int,
+        val progressMessage: String?,
+    )
+
+    private val progressSnapshotFlow = combine(
+        _syncedInCurrentRun,
+        _totalInCurrentRun,
+        pendingSyncDao.observeFailedCount(),
+        _progressMessage,
+    ) { synced, total, failed, msg ->
+        SyncProgressSnapshot(synced, total, failed, msg)
+    }
+
+    private val coreSyncFlow = combine(
         pendingSyncDao.observePendingCount(),
         _isOnline,
         _isSyncing,
         _lastError,
         prefs.lastSyncFlow,
     ) { pending, online, syncing, err, lastSync ->
-        val badge = when {
-            !online -> SyncStatusBadge.OFFLINE
-            syncing -> SyncStatusBadge.SYNCING
-            err != null && pending > 0 -> SyncStatusBadge.ERROR
-            pending == 0 -> SyncStatusBadge.SYNCED
-            else -> SyncStatusBadge.IDLE
-        }
         SyncEngineState(
-            status = badge,
             pendingCount = pending,
             lastSyncEpochMs = lastSync,
             isOnline = online,
             lastError = err,
+            status = if (syncing) SyncStatusBadge.SYNCING else SyncStatusBadge.IDLE,
+        )
+    }
+
+    val syncState: StateFlow<SyncEngineState> = combine(
+        coreSyncFlow,
+        progressSnapshotFlow,
+    ) { core, progress ->
+        val activePending = (core.pendingCount - progress.failedCount).coerceAtLeast(0)
+        val syncing = core.status == SyncStatusBadge.SYNCING
+        val badge = when {
+            !core.isOnline -> SyncStatusBadge.OFFLINE
+            syncing -> SyncStatusBadge.SYNCING
+            progress.failedCount > 0 && activePending == 0 -> SyncStatusBadge.ERROR
+            core.lastError != null && core.pendingCount > 0 -> SyncStatusBadge.ERROR
+            core.pendingCount == 0 -> SyncStatusBadge.SYNCED
+            else -> SyncStatusBadge.IDLE
+        }
+        core.copy(
+            status = badge,
+            syncedInCurrentRun = progress.syncedInRun,
+            totalInCurrentRun = progress.totalInRun,
+            failedCount = progress.failedCount,
+            progressMessage = progress.progressMessage,
         )
     }.stateIn(engineScope, SharingStarted.Eagerly, SyncEngineState(isOnline = _isOnline.value))
 
@@ -286,30 +322,78 @@ class OfflineFirstSyncEngine(
         categories: List<CategoryNode>,
         supersededIds: List<String> = emptyList(),
         syncToCloud: Boolean = true,
+    ) = saveContactsBatchChunkedLocalFirst(
+        contacts = contacts,
+        categories = categories,
+        supersededIds = supersededIds,
+        syncToCloud = syncToCloud,
+    )
+
+    /**
+     * Progressive chunked local-first bulk save (500 contacts per SQLite transaction).
+     * Each committed chunk runs under NonCancellable so large 16k-30k imports never lose
+     * already-saved progress if the user navigates away or the OS pauses the screen.
+     */
+    suspend fun saveContactsBatchChunkedLocalFirst(
+        contacts: List<ContactRecord>,
+        categories: List<CategoryNode>,
+        supersededIds: List<String> = emptyList(),
+        syncToCloud: Boolean = true,
+        chunkSize: Int = 500,
+        onChunkSaved: (savedSoFar: Int, total: Int) -> Unit = { _, _ -> },
     ) = withContext(Dispatchers.IO) {
         val nowMs = System.currentTimeMillis()
-        val entities = contacts.map {
-            ContactEntity.fromDomain(
-                record = it.copy(syncedToDevice = false, clientUpdatedAtMs = nowMs),
-                nowMs = nowMs,
-                syncState = SyncState.PENDING,
-            )
-        }
         val catEntities = categories.map {
             CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
         }
 
-        if (supersededIds.isNotEmpty()) {
-            contactDao.deleteContactsWithIndexes(supersededIds)
+        if (catEntities.isNotEmpty()) {
+            withContext(NonCancellable) {
+                catEntities.chunked(400).forEach { categoryDao.upsertAll(it) }
+                if (syncToCloud) {
+                    categories.map { outboxUpsert(SyncEntityType.CATEGORY, it.id, nowMs) }
+                        .chunked(400)
+                        .forEach { pendingSyncDao.enqueueBatch(it) }
+                }
+            }
         }
-        contactDao.upsertBatchWithIndexes(entities, catEntities, categoryDao)
 
-        if (syncToCloud) {
-            val queueItems = ArrayList<PendingSyncEntity>(entities.size + supersededIds.size + catEntities.size)
-            entities.forEach { queueItems += outboxUpsert(SyncEntityType.CONTACT, it.id, nowMs) }
-            supersededIds.forEach { queueItems += outboxDelete(SyncEntityType.CONTACT, it, nowMs) }
-            categories.forEach { queueItems += outboxUpsert(SyncEntityType.CATEGORY, it.id, nowMs) }
-            queueItems.chunked(400).forEach { pendingSyncDao.enqueueBatch(it) }
+        if (supersededIds.isNotEmpty()) {
+            withContext(NonCancellable) {
+                supersededIds.distinct().chunked(400).forEach { delChunk ->
+                    contactDao.deleteContactsWithIndexes(delChunk)
+                    if (syncToCloud) {
+                        pendingSyncDao.enqueueBatch(
+                            delChunk.map { outboxDelete(SyncEntityType.CONTACT, it, nowMs) }
+                        )
+                    }
+                }
+            }
+        }
+
+        val total = contacts.size
+        var savedSoFar = 0
+        for (chunk in contacts.chunked(chunkSize.coerceIn(100, 1000))) {
+            val entities = chunk.map {
+                ContactEntity.fromDomain(
+                    record = it.copy(syncedToDevice = false, clientUpdatedAtMs = nowMs),
+                    nowMs = nowMs,
+                    syncState = SyncState.PENDING,
+                )
+            }
+            withContext(NonCancellable) {
+                contactDao.upsertBatchWithIndexes(entities, emptyList(), categoryDao)
+                if (syncToCloud) {
+                    pendingSyncDao.enqueueBatch(
+                        entities.map { outboxUpsert(SyncEntityType.CONTACT, it.id, nowMs) }
+                    )
+                }
+            }
+            savedSoFar += entities.size
+            onChunkSaved(savedSoFar, total)
+        }
+
+        if (syncToCloud && (contacts.isNotEmpty() || categories.isNotEmpty() || supersededIds.isNotEmpty())) {
             triggerBackgroundFlush()
         }
     }
@@ -490,23 +574,39 @@ class OfflineFirstSyncEngine(
         }
     }
 
-    suspend fun syncNow(userId: String): Result<Int> = withContext(Dispatchers.IO) {
+    suspend fun syncNow(userId: String, resetFailed: Boolean = true): Result<Int> = withContext(Dispatchers.IO) {
         activeUserId = userId
         runCatching {
-            val pushed = flushPendingQueue(userId)
+            val pushed = flushPendingQueue(userId, resetFailedFirst = resetFailed)
             pullRemoteMetadataCatchUp(userId)
             prefs.setLastSyncMs(System.currentTimeMillis())
             pushed
         }
     }
 
-    suspend fun flushPendingQueue(userId: String): Int = flushMutex.withLock {
+    suspend fun retryFailedSync(userId: String): Result<Int> = syncNow(userId, resetFailed = true)
+
+    suspend fun flushPendingQueue(userId: String, resetFailedFirst: Boolean = false): Int = flushMutex.withLock {
         if (!_isOnline.value) return 0
+        if (resetFailedFirst) {
+            pendingSyncDao.resetFailedRetries()
+        }
+        val initialActive = pendingSyncDao.getActivePendingCount()
+        if (initialActive == 0) {
+            _lastError.value = null
+            return 0
+        }
+
         _isSyncing.value = true
+        _syncedInCurrentRun.value = 0
+        _totalInCurrentRun.value = initialActive
+        _progressMessage.value = "جاري تجهيز رفع $initialActive عنصر..."
         var syncedCount = 0
+        val waveLimit = 1200
+
         try {
-            while (true) {
-                val batch = pendingSyncDao.getPendingBatch(limit = 60)
+            while (_isOnline.value) {
+                val batch = pendingSyncDao.getPendingBatch(limit = waveLimit)
                 if (batch.isEmpty()) break
 
                 val contactUpserts = batch.filter {
@@ -525,124 +625,171 @@ class OfflineFirstSyncEngine(
                     item !in contactUpserts && item !in contactDeletes && item !in categoryUpserts && item !in callLogUpserts
                 }
 
-                var hadBlockingFailure = false
+                var waveProgressed = 0
 
-                // Batch Contact Upserts
+                // 1) Parallel Smart Batch Contact Upserts (1,200 contacts per wave = 3x400 parallel WriteBatches)
                 if (contactUpserts.isNotEmpty()) {
-                    val entities = contactDao.getByIds(contactUpserts.map { it.entityId })
+                    val requestedIds = contactUpserts.map { it.entityId }.distinct()
+                    val entities = contactDao.getByIdsChunked(requestedIds)
+                    val entityById = entities.associateBy { it.id }
+                    val byEntityId = contactUpserts.associateBy { it.entityId }
+
+                    // Clean up orphaned queue entries whose local contact was already purged
+                    val orphanKeys = contactUpserts
+                        .filter { !entityById.containsKey(it.entityId) }
+                        .map { it.queueKey }
+                    if (orphanKeys.isNotEmpty()) {
+                        pendingSyncDao.removeBatchChunked(orphanKeys)
+                        waveProgressed += orphanKeys.size
+                    }
+
                     val domains = entities.map { it.toDomain().copy(syncedToDevice = false) }
                     if (domains.isNotEmpty()) {
-                        val batchRes = firestoreRepo.batchUpsertContacts(userId, domains)
-                        if (batchRes.isSuccess) {
-                            contactDao.markSyncState(entities.map { it.id }, SyncState.SYNCED.name)
-                            pendingSyncDao.removeBatch(contactUpserts.map { it.queueKey })
-                            syncedCount += entities.size
-                        } else {
-                            // Fall back per-doc so existing docs preserve Firestore createdAt
-                            var allFallbackOk = true
-                            val byId = contactUpserts.associateBy { it.entityId }
-                            domains.forEach { domain ->
-                                val item = byId[domain.id]
-                                firestoreRepo.upsertContact(userId, domain).onSuccess {
-                                    contactDao.markSyncState(listOf(domain.id), SyncState.SYNCED.name)
-                                    item?.let { pendingSyncDao.remove(it.queueKey) }
-                                    syncedCount++
-                                }.onFailure { err ->
-                                    allFallbackOk = false
-                                    item?.let {
-                                        pendingSyncDao.markRetryFailure(it.queueKey, err.localizedMessage ?: "Sync error")
-                                    }
-                                    _lastError.value = err.localizedMessage
-                                }
-                            }
-                            if (!allFallbackOk) hadBlockingFailure = true
+                        val baseSynced = syncedCount
+                        val outcome = firestoreRepo.batchUpsertContactsSmart(userId, domains) { uploadedInWave, _ ->
+                            val currentDone = baseSynced + uploadedInWave
+                            val runTotal = maxOf(_totalInCurrentRun.value, currentDone)
+                            _syncedInCurrentRun.value = currentDone
+                            _totalInCurrentRun.value = runTotal
+                            _progressMessage.value = "جاري الرفع السريع: $currentDone / $runTotal"
                         }
-                    } else {
-                        pendingSyncDao.removeBatch(contactUpserts.map { it.queueKey })
+                        if (outcome.succeededIds.isNotEmpty()) {
+                            contactDao.markSyncStateChunked(outcome.succeededIds, SyncState.SYNCED.name)
+                            val doneKeys = outcome.succeededIds.mapNotNull { byEntityId[it]?.queueKey }
+                            pendingSyncDao.removeBatchChunked(doneKeys)
+                            syncedCount += outcome.succeededIds.size
+                            waveProgressed += outcome.succeededIds.size
+                        }
+                        if (outcome.failedErrorsById.isNotEmpty()) {
+                            val grouped = outcome.failedErrorsById.entries.groupBy(
+                                keySelector = { it.value },
+                                valueTransform = { byEntityId[it.key]?.queueKey },
+                            )
+                            for ((errMsg, maybeKeys) in grouped) {
+                                val keys = maybeKeys.filterNotNull()
+                                if (keys.isNotEmpty()) {
+                                    pendingSyncDao.markRetryFailureBatchChunked(keys, errMsg)
+                                }
+                                _lastError.value = errMsg
+                            }
+                        }
                     }
                 }
 
-                // Batch Contact Deletes
+                // 2) Batch Contact Deletes
                 if (contactDeletes.isNotEmpty()) {
                     val ids = contactDeletes.map { it.entityId }
                     firestoreRepo.batchDeleteContacts(userId, ids).onSuccess {
-                        pendingSyncDao.removeBatch(contactDeletes.map { it.queueKey })
+                        pendingSyncDao.removeBatchChunked(contactDeletes.map { it.queueKey })
                         syncedCount += ids.size
+                        waveProgressed += ids.size
                     }.onFailure { err ->
-                        hadBlockingFailure = true
-                        contactDeletes.forEach {
-                            pendingSyncDao.markRetryFailure(it.queueKey, err.localizedMessage ?: "Delete error")
-                        }
-                        _lastError.value = err.localizedMessage
+                        val msg = err.localizedMessage ?: "Delete error"
+                        pendingSyncDao.markRetryFailureBatchChunked(contactDeletes.map { it.queueKey }, msg)
+                        _lastError.value = msg
                     }
                 }
 
-                // Batch Category Upserts
+                // 3) Smart Batch Category Upserts (preserves existing createdAt on updates)
                 if (categoryUpserts.isNotEmpty()) {
-                    val nodes = categoryUpserts.mapNotNull { categoryDao.getById(it.entityId)?.toDomain() }
+                    val byEntityId = categoryUpserts.associateBy { it.entityId }
+                    val nodes = ArrayList<CategoryNode>(categoryUpserts.size)
+                    val orphanKeys = ArrayList<String>()
+                    for (item in categoryUpserts) {
+                        val node = categoryDao.getById(item.entityId)?.toDomain()
+                        if (node != null) nodes += node else orphanKeys += item.queueKey
+                    }
+                    if (orphanKeys.isNotEmpty()) {
+                        pendingSyncDao.removeBatchChunked(orphanKeys)
+                        waveProgressed += orphanKeys.size
+                    }
                     if (nodes.isNotEmpty()) {
-                        firestoreRepo.upsertCategories(userId, nodes).onSuccess {
-                            pendingSyncDao.removeBatch(categoryUpserts.map { it.queueKey })
-                            syncedCount += nodes.size
-                        }.onFailure { err ->
-                            hadBlockingFailure = true
-                            categoryUpserts.forEach {
-                                pendingSyncDao.markRetryFailure(it.queueKey, err.localizedMessage ?: "Category sync error")
-                            }
+                        val outcome = firestoreRepo.upsertCategoriesSmart(userId, nodes)
+                        if (outcome.succeededIds.isNotEmpty()) {
+                            val doneKeys = outcome.succeededIds.mapNotNull { byEntityId[it]?.queueKey }
+                            pendingSyncDao.removeBatchChunked(doneKeys)
+                            syncedCount += outcome.succeededIds.size
+                            waveProgressed += outcome.succeededIds.size
                         }
-                    } else {
-                        pendingSyncDao.removeBatch(categoryUpserts.map { it.queueKey })
-                    }
-                }
-
-                // Batch CallLog Upserts
-                if (callLogUpserts.isNotEmpty()) {
-                    val logEntities = callLogUpserts.mapNotNull { callLogDao.getById(it.entityId) }
-                    if (logEntities.isNotEmpty()) {
-                        val batchRes = firestoreRepo.batchUpsertCallLogs(userId, logEntities.map { it.toCloudModel() })
-                        if (batchRes.isSuccess) {
-                            logEntities.forEach { callLogDao.markSyncState(it.id, SyncState.SYNCED.name) }
-                            pendingSyncDao.removeBatch(callLogUpserts.map { it.queueKey })
-                            syncedCount += logEntities.size
-                        } else {
-                            var allLogsOk = true
-                            val byId = callLogUpserts.associateBy { it.entityId }
-                            logEntities.forEach { logEntity ->
-                                val item = byId[logEntity.id]
-                                firestoreRepo.upsertCallLog(userId, logEntity.toCloudModel()).onSuccess {
-                                    callLogDao.markSyncState(logEntity.id, SyncState.SYNCED.name)
-                                    item?.let { pendingSyncDao.remove(it.queueKey) }
-                                    syncedCount++
-                                }.onFailure { err ->
-                                    allLogsOk = false
-                                    item?.let {
-                                        pendingSyncDao.markRetryFailure(it.queueKey, err.localizedMessage ?: "Call log error")
-                                    }
+                        if (outcome.failedErrorsById.isNotEmpty()) {
+                            val grouped = outcome.failedErrorsById.entries.groupBy(
+                                keySelector = { it.value },
+                                valueTransform = { byEntityId[it.key]?.queueKey },
+                            )
+                            for ((errMsg, maybeKeys) in grouped) {
+                                val keys = maybeKeys.filterNotNull()
+                                if (keys.isNotEmpty()) {
+                                    pendingSyncDao.markRetryFailureBatchChunked(keys, errMsg)
                                 }
+                                _lastError.value = errMsg
                             }
-                            if (!allLogsOk) hadBlockingFailure = true
                         }
-                    } else {
-                        pendingSyncDao.removeBatch(callLogUpserts.map { it.queueKey })
                     }
                 }
 
-                // Process Remaining Single Operations (Transcripts, Deletes, WhatsApp Logs, Templates)
+                // 4) Smart Batch CallLog Upserts
+                if (callLogUpserts.isNotEmpty()) {
+                    val byEntityId = callLogUpserts.associateBy { it.entityId }
+                    val logEntities = ArrayList<AppCallLogEntity>(callLogUpserts.size)
+                    val orphanKeys = ArrayList<String>()
+                    for (item in callLogUpserts) {
+                        val logEntity = callLogDao.getById(item.entityId)
+                        if (logEntity != null) logEntities += logEntity else orphanKeys += item.queueKey
+                    }
+                    if (orphanKeys.isNotEmpty()) {
+                        pendingSyncDao.removeBatchChunked(orphanKeys)
+                        waveProgressed += orphanKeys.size
+                    }
+                    if (logEntities.isNotEmpty()) {
+                        val outcome = firestoreRepo.batchUpsertCallLogsSmart(userId, logEntities.map { it.toCloudModel() })
+                        if (outcome.succeededIds.isNotEmpty()) {
+                            outcome.succeededIds.forEach { callLogDao.markSyncState(it, SyncState.SYNCED.name) }
+                            val doneKeys = outcome.succeededIds.mapNotNull { byEntityId[it]?.queueKey }
+                            pendingSyncDao.removeBatchChunked(doneKeys)
+                            syncedCount += outcome.succeededIds.size
+                            waveProgressed += outcome.succeededIds.size
+                        }
+                        if (outcome.failedErrorsById.isNotEmpty()) {
+                            val grouped = outcome.failedErrorsById.entries.groupBy(
+                                keySelector = { it.value },
+                                valueTransform = { byEntityId[it.key]?.queueKey },
+                            )
+                            for ((errMsg, maybeKeys) in grouped) {
+                                val keys = maybeKeys.filterNotNull()
+                                if (keys.isNotEmpty()) {
+                                    pendingSyncDao.markRetryFailureBatchChunked(keys, errMsg)
+                                }
+                                _lastError.value = errMsg
+                            }
+                        }
+                    }
+                }
+
+                // 5) Process Remaining Single Operations (Transcripts, Deletes, WhatsApp Logs, Templates)
                 for (item in others) {
                     val success = processSingleOutboxItem(userId, item)
                     if (success) {
                         pendingSyncDao.remove(item.queueKey)
                         syncedCount++
-                    } else {
-                        hadBlockingFailure = true
+                        waveProgressed++
                     }
                 }
 
-                if (batch.size < 60 || hadBlockingFailure) break
+                // Incremental checkpoint after every productive wave so timestamp & UI stay live
+                if (waveProgressed > 0) {
+                    _syncedInCurrentRun.value = syncedCount
+                    prefs.setLastSyncMs(System.currentTimeMillis())
+                }
+
+                // Only stop early if an entire wave made zero progress (e.g. offline/network down)
+                if (waveProgressed == 0) break
             }
+
             if (syncedCount > 0) {
                 prefs.setLastSyncMs(System.currentTimeMillis())
-                _lastError.value = null
+                if (pendingSyncDao.getActivePendingCount() == 0) {
+                    _lastError.value = null
+                }
             }
             syncedCount
         } catch (e: CancellationException) {
@@ -652,6 +799,9 @@ class OfflineFirstSyncEngine(
             syncedCount
         } finally {
             _isSyncing.value = false
+            _progressMessage.value = null
+            _syncedInCurrentRun.value = 0
+            _totalInCurrentRun.value = 0
         }
     }
 
@@ -744,7 +894,9 @@ class OfflineFirstSyncEngine(
             }
         }
         if (toSave.isNotEmpty()) {
-            contactDao.upsertBatchWithIndexes(toSave, emptyList(), categoryDao)
+            toSave.chunked(500).forEach { chunk ->
+                contactDao.upsertBatchWithIndexes(chunk, emptyList(), categoryDao)
+            }
         }
     }
 

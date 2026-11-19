@@ -42,6 +42,10 @@ data class SyncEngineState(
     val lastSyncEpochMs: Long = 0L,
     val isOnline: Boolean = true,
     val lastError: String? = null,
+    val syncedInCurrentRun: Int = 0,
+    val totalInCurrentRun: Int = 0,
+    val failedCount: Int = 0,
+    val progressMessage: String? = null,
 )
 
 @Serializable
@@ -158,7 +162,7 @@ data class CloudCallTranscriptRecord(
     fun toFirestoreMap(isCreate: Boolean): Map<String, Any> = buildMap {
         contactId?.takeIf { it.isNotBlank() }?.let { put("contactId", it.take(128)) }
         put("phone", phone.take(60))
-        put("contactName", contactName.ifBlank { phone.ifBlank { "Call" } }.take(200))
+        put("contactName", contactName.trim().ifBlank { phone.trim().ifBlank { "Call" } }.take(200))
         if (audioFileName.isNotBlank()) put("audioFileName", audioFileName.take(200))
         put("audioSizeBytes", audioSizeBytes.coerceAtLeast(0L))
         put("timestampMs", timestampMs.coerceAtLeast(0L))
@@ -176,7 +180,11 @@ data class CloudCallTranscriptRecord(
         if (suggestedCategory.isNotBlank()) put("suggestedCategory", suggestedCategory.take(300))
         put("eventAdded", eventAdded)
         put("notesSaved", notesSaved)
-        put("status", status.ifBlank { "PENDING" }.take(32))
+        val safeStatus = when (status.uppercase()) {
+            "PENDING", "PROCESSING", "READY", "ERROR", "NO_AUDIO" -> status.uppercase()
+            else -> "PENDING"
+        }
+        put("status", safeStatus)
         put("clientUpdatedAtMs", clientUpdatedAtMs.coerceAtLeast(0L))
         if (isCreate) {
             put("createdAt", FieldValue.serverTimestamp())

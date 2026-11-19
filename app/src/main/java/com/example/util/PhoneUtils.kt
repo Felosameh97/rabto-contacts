@@ -6,8 +6,21 @@ object PhoneUtils {
 
     private val whitespaceOrDash = Regex("[\\s\\-().'\"\\u200E\\u200F\\u202A-\\u202E]")
 
+    fun normalizeDigits(raw: String): String {
+        if (raw.isEmpty()) return raw
+        val sb = StringBuilder(raw.length)
+        for (ch in raw) {
+            when (ch) {
+                in '\u0660'..'\u0669' -> sb.append(('0'.code + (ch.code - '\u0660'.code)).toChar())
+                in '\u06F0'..'\u06F9' -> sb.append(('0'.code + (ch.code - '\u06F0'.code)).toChar())
+                else -> sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
     fun cleanRawInput(raw: String): String {
-        return raw.trim()
+        return normalizeDigits(raw).trim()
             .removePrefix("'")
             .replace(whitespaceOrDash, "")
     }
@@ -89,8 +102,9 @@ object PhoneUtils {
     }
 
     fun extractPhonesFromSharedText(sharedText: String): List<String> {
+        val normalizedText = normalizeDigits(sharedText)
         val regex = Regex("""(\+?\d[\d\s\-().]{6,18}\d)""")
-        return regex.findAll(sharedText)
+        return regex.findAll(normalizedText)
             .map { normalizePhone(it.value) }
             .filter { it.isNotBlank() && it.length >= 7 }
             .distinct()

@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import com.example.domain.model.ContactRecord
 import com.example.domain.model.SyncState
 import com.example.util.PhoneUtils
 import kotlinx.coroutines.flow.Flow
@@ -20,6 +21,65 @@ data class PhoneLookupMatch(
     @Embedded val contact: ContactEntity,
 )
 
+/**
+ * Lightweight projection for displaying 25,000+ contacts smoothly without loading the heavy
+ * searchBlob column into SQLite CursorWindow memory.
+ */
+data class ContactListRow(
+    val id: String,
+    val displayName: String,
+    val nickname: String?,
+    val primaryPhone: String,
+    val phonesJoined: String,
+    val emailsJoined: String,
+    val categoryPathsFlat: String,
+    val tagsJoined: String,
+    val organization: String?,
+    val jobTitle: String?,
+    val notes: String?,
+    val address: String?,
+    val district: String?,
+    val latitude: Double?,
+    val longitude: Double?,
+    val telegramHandle: String?,
+    val website: String?,
+    val photoUri: String?,
+    val isFavorite: Boolean,
+    val updatedAtEpochMs: Long,
+    val avatarColorSeed: Int,
+    val isMuted: Boolean,
+    val isBlocked: Boolean,
+    val lastContactedEpochMs: Long,
+) {
+    fun toDomain(): ContactRecord = ContactRecord(
+        id = id,
+        displayName = displayName,
+        nickname = nickname,
+        primaryPhone = primaryPhone,
+        phones = phonesJoined.split("\u001F").filter { it.isNotBlank() },
+        emails = emailsJoined.split("\u001F").filter { it.isNotBlank() },
+        categoryPaths = categoryPathsFlat.split("\u001F").filter { it.isNotBlank() },
+        tags = tagsJoined.split("\u001F").filter { it.isNotBlank() },
+        organization = organization,
+        jobTitle = jobTitle,
+        notes = notes,
+        address = address,
+        district = district,
+        latitude = latitude,
+        longitude = longitude,
+        telegramHandle = telegramHandle,
+        website = website,
+        photoUri = photoUri,
+        syncedToDevice = false,
+        isFavorite = isFavorite,
+        avatarColorSeed = avatarColorSeed,
+        muted = isMuted,
+        blocked = isBlocked,
+        lastContactedEpochMs = lastContactedEpochMs,
+        clientUpdatedAtMs = updatedAtEpochMs,
+    )
+}
+
 @Dao
 interface ContactDao {
 
@@ -31,6 +91,19 @@ interface ContactDao {
 
     @Query("SELECT * FROM contacts WHERE isDeleted = 0 ORDER BY displayName COLLATE NOCASE ASC")
     fun observeAllAlphabetical(): Flow<List<ContactEntity>>
+
+    @Query(
+        """
+        SELECT id, displayName, nickname, primaryPhone, phonesJoined, emailsJoined,
+               categoryPathsFlat, tagsJoined, organization, jobTitle, notes, address,
+               district, latitude, longitude, telegramHandle, website, photoUri,
+               isFavorite, updatedAtEpochMs, avatarColorSeed, isMuted, isBlocked, lastContactedEpochMs
+        FROM contacts
+        WHERE isDeleted = 0
+        ORDER BY displayName COLLATE NOCASE ASC
+        """
+    )
+    fun observeAllAlphabeticalLight(): Flow<List<ContactListRow>>
 
     @Query("SELECT * FROM contacts WHERE isDeleted = 0 AND isFavorite = 1 ORDER BY displayName COLLATE NOCASE ASC LIMIT 60")
     fun observeFavorites(): Flow<List<ContactEntity>>
@@ -52,6 +125,16 @@ interface ContactDao {
 
     @Query("SELECT * FROM contacts WHERE id IN (:ids) AND isDeleted = 0")
     suspend fun getByIds(ids: List<String>): List<ContactEntity>
+
+    suspend fun getByIdsChunked(ids: List<String>): List<ContactEntity> {
+        if (ids.isEmpty()) return emptyList()
+        if (ids.size <= 450) return getByIds(ids)
+        val out = ArrayList<ContactEntity>(ids.size)
+        for (chunk in ids.chunked(450)) {
+            out += getByIds(chunk)
+        }
+        return out
+    }
 
     @Query("SELECT id FROM contacts WHERE isDeleted = 0")
     suspend fun getAllActiveIds(): List<String>
@@ -170,6 +253,13 @@ interface ContactDao {
 
     @Query("UPDATE contacts SET syncState = :syncState WHERE id IN (:ids)")
     suspend fun markSyncState(ids: List<String>, syncState: String)
+
+    suspend fun markSyncStateChunked(ids: List<String>, syncState: String) {
+        if (ids.isEmpty()) return
+        for (chunk in ids.chunked(450)) {
+            markSyncState(chunk, syncState)
+        }
+    }
 
     @Query("DELETE FROM contacts")
     suspend fun clearAll()
@@ -536,11 +626,17 @@ interface PendingSyncDao {
     @Query("SELECT COUNT(*) FROM pending_sync_queue")
     fun observePendingCount(): Flow<Int>
 
+    @Query("SELECT COUNT(*) FROM pending_sync_queue WHERE retryCount >= :maxRetries")
+    fun observeFailedCount(maxRetries: Int = 5): Flow<Int>
+
     @Query("SELECT COUNT(*) FROM pending_sync_queue")
     suspend fun getPendingCount(): Int
 
-    @Query("SELECT * FROM pending_sync_queue ORDER BY enqueuedAtEpochMs ASC LIMIT :limit")
-    suspend fun getPendingBatch(limit: Int = 50): List<PendingSyncEntity>
+    @Query("SELECT COUNT(*) FROM pending_sync_queue WHERE retryCount < :maxRetries")
+    suspend fun getActivePendingCount(maxRetries: Int = 5): Int
+
+    @Query("SELECT * FROM pending_sync_queue WHERE retryCount < :maxRetries ORDER BY retryCount ASC, enqueuedAtEpochMs ASC LIMIT :limit")
+    suspend fun getPendingBatch(limit: Int = 400, maxRetries: Int = 5): List<PendingSyncEntity>
 
     @Query("SELECT * FROM pending_sync_queue WHERE entityType = :entityType AND entityId = :entityId LIMIT 1")
     suspend fun getByEntity(entityType: String, entityId: String): PendingSyncEntity?
@@ -557,11 +653,32 @@ interface PendingSyncDao {
     @Query("DELETE FROM pending_sync_queue WHERE queueKey IN (:queueKeys)")
     suspend fun removeBatch(queueKeys: List<String>)
 
+    suspend fun removeBatchChunked(queueKeys: List<String>) {
+        if (queueKeys.isEmpty()) return
+        for (chunk in queueKeys.chunked(450)) {
+            removeBatch(chunk)
+        }
+    }
+
     @Query("DELETE FROM pending_sync_queue WHERE entityType = :entityType AND entityId = :entityId")
     suspend fun removeByEntity(entityType: String, entityId: String)
 
     @Query("UPDATE pending_sync_queue SET retryCount = retryCount + 1, lastError = :error WHERE queueKey = :queueKey")
     suspend fun markRetryFailure(queueKey: String, error: String)
+
+    @Query("UPDATE pending_sync_queue SET retryCount = retryCount + 1, lastError = :error WHERE queueKey IN (:queueKeys)")
+    suspend fun markRetryFailureBatch(queueKeys: List<String>, error: String)
+
+    suspend fun markRetryFailureBatchChunked(queueKeys: List<String>, error: String) {
+        if (queueKeys.isEmpty()) return
+        val safeErr = error.take(300)
+        for (chunk in queueKeys.chunked(450)) {
+            markRetryFailureBatch(chunk, safeErr)
+        }
+    }
+
+    @Query("UPDATE pending_sync_queue SET retryCount = 0, lastError = NULL WHERE retryCount > 0")
+    suspend fun resetFailedRetries()
 
     @Query("DELETE FROM pending_sync_queue")
     suspend fun clearAll()

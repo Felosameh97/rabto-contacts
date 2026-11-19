@@ -62,14 +62,18 @@ import com.example.util.T9SearchMatcher
 import com.example.util.VCardUtils
 import com.example.widget.RabtaWidget
 import com.google.firebase.firestore.DocumentSnapshot
+import java.io.BufferedInputStream
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Collections
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -77,6 +81,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -148,10 +153,13 @@ class RabtaViewModel(
         .map { list -> list.map { it.toDomain() } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), PaymentUtils.defaultTemplates)
 
+    private val bulkWorkScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     val syncEngineState: StateFlow<SyncEngineState> = syncEngine.syncState
 
-    val allContactsAlphabetical: StateFlow<List<ContactRecord>> = contactDao.observeAllAlphabetical()
+    val allContactsAlphabetical: StateFlow<List<ContactRecord>> = contactDao.observeAllAlphabeticalLight()
         .map { list -> list.map { it.toDomain() } }
+        .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val callTranscripts: StateFlow<List<CallTranscriptRecord>> = transcriptDao.observeAll()
@@ -603,8 +611,8 @@ class RabtaViewModel(
     }
 
     fun triggerCloudSyncNow() {
-        viewModelScope.launch {
-            syncEngine.syncNow(currentUserId)
+        bulkWorkScope.launch {
+            syncEngine.syncNow(currentUserId, resetFailed = true)
         }
     }
 
@@ -1106,6 +1114,20 @@ class RabtaViewModel(
         }
     }
 
+    private suspend fun loadAllContactsPaged(): List<ContactRecord> = withContext(Dispatchers.IO) {
+        val total = contactDao.getTotalCount()
+        val all = ArrayList<ContactRecord>(total)
+        var offset = 0
+        val pageSize = 1500
+        while (true) {
+            val page = contactDao.getRecentOrAllPage(limit = pageSize, offset = offset)
+            if (page.isEmpty()) break
+            page.forEach { all += it.toDomain() }
+            offset += page.size
+        }
+        all
+    }
+
     fun searchForDialpad(query: String) {
         dialpadJob?.cancel()
         val raw = query.trim()
@@ -1117,7 +1139,7 @@ class RabtaViewModel(
         dialpadJob = viewModelScope.launch {
             delay(65L)
             val results = withContext(Dispatchers.IO) {
-                val roomHits = contactDao.searchContacts(trimmed, limit = 15, offset = 0).map { it.toDomain() }
+                val roomHits = contactDao.searchContacts(trimmed, limit = 20, offset = 0).map { it.toDomain() }
                 val flowContacts = allContactsAlphabetical.value
                 val candidatePool = if (flowContacts.isNotEmpty()) {
                     dialpadContactsCache = flowContacts
@@ -1125,19 +1147,18 @@ class RabtaViewModel(
                     flowContacts
                 } else {
                     val now = System.currentTimeMillis()
-                    if (dialpadContactsCache.isEmpty() || now - dialpadCacheUpdatedMs > 8_000L) {
-                        val loaded = contactDao.getRecentOrAllPage(limit = 5000, offset = 0).map { it.toDomain() }
-                        dialpadContactsCache = loaded
+                    if (dialpadContactsCache.isEmpty() || now - dialpadCacheUpdatedMs > 15_000L) {
+                        dialpadContactsCache = loadAllContactsPaged()
                         dialpadCacheUpdatedMs = now
                     }
                     dialpadContactsCache
                 }
                 val t9Hits = if (candidatePool.isNotEmpty()) {
-                    T9SearchMatcher.filterAndRank(raw, candidatePool, limit = 15)
+                    T9SearchMatcher.filterAndRank(raw, candidatePool, limit = 20)
                 } else {
                     emptyList()
                 }
-                (t9Hits + roomHits).distinctBy { it.id }.take(15)
+                (t9Hits + roomHits).distinctBy { it.id }.take(20)
             }
             _dialpadMatches.value = results
         }
@@ -1351,20 +1372,24 @@ class RabtaViewModel(
     }
 
     fun importBundledDatasets(uploadToCloud: Boolean = true) {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
             _importProgressText.value = "جاري قراءة ملفات جهات الاتصال المرفقة..."
             try {
                 val (allContacts, allCatPaths) = withContext(Dispatchers.IO) {
-                    val s1 = appContext.assets.open("contacts_seed.csv").use { CsvParser.parseStream(it) }
+                    val s1 = appContext.assets.open("contacts_seed.csv").use {
+                        CsvParser.parseStream(it, skipEnrich = true)
+                    }
                     val s2 = appContext.assets.open("eaeat_2023_leader.csv").use {
-                        CsvParser.parseStream(it, defaultCategory = "الجامعة > الأكاديمية (EAEAT) > دفعة 2023")
+                        CsvParser.parseStream(it, defaultCategory = "الجامعة > الأكاديمية (EAEAT) > دفعة 2023", skipEnrich = true)
                     }
                     (s1.contacts + s2.contacts) to (s1.categoryPaths + s2.categoryPaths)
                 }
                 val result = persistImportedDataset(allContacts, allCatPaths, uploadToCloud)
                 prefs.setBundledImported(true)
-                _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال (${result.categoriesCreated} فئة متداخلة، ${result.geoMatchedCount} على الخريطة)"
+                val verifiedTotal = contactDao.getTotalCount()
+                _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال (الإجمالي الآن: $verifiedTotal • ${result.categoriesCreated} فئة)"
             } catch (e: Exception) {
                 _statusMessage.value = "فشل الاستيراد: ${e.localizedMessage}"
             } finally {
@@ -1375,9 +1400,10 @@ class RabtaViewModel(
     }
 
     fun importDevicePhonebookContacts(uploadToCloud: Boolean = true) {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
-            _importProgressText.value = "جاري استيراد كل جهات الاتصال من سجل الهاتف (People)..."
+            _importProgressText.value = "جاري قراءة كل جهات الاتصال من سجل الهاتف (People)..."
             try {
                 val res = deviceContactsManager.readAllDeviceContacts()
                 res.onSuccess { (contacts, cats) ->
@@ -1385,7 +1411,8 @@ class RabtaViewModel(
                         _statusMessage.value = "لم يتم العثور على جهات اتصال في الهاتف"
                     } else {
                         val summary = persistImportedDataset(contacts, cats, uploadToCloud)
-                        _statusMessage.value = "تم استيراد ${summary.importedCount} جهة من الهاتف وتصنيفهم في ${summary.categoriesCreated} فئة"
+                        val verifiedTotal = contactDao.getTotalCount()
+                        _statusMessage.value = "تم حفظ ${summary.importedCount} جهة من الهاتف (الإجمالي الآن: $verifiedTotal)"
                     }
                 }.onFailure { err ->
                     _statusMessage.value = "تعذر الاستيراد من الهاتف: ${err.localizedMessage}"
@@ -1398,7 +1425,8 @@ class RabtaViewModel(
     }
 
     fun scanGoogleDriveWithToken(accessToken: String) {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
             _importProgressText.value = "جاري البحث داخل Google Drive عن جداول وملفات بها أرقام..."
             try {
@@ -1408,7 +1436,8 @@ class RabtaViewModel(
                         _statusMessage.value = "لم يتم العثور على أرقام جديدة داخل ملفات Google Drive النصية/الجداول"
                     } else {
                         val summary = persistImportedDataset(outcome.contacts, outcome.categoryPaths, uploadToCloud = true)
-                        _statusMessage.value = "تم استخراج ${summary.importedCount} رقم من ${outcome.filesScanned} ملف في Google Drive"
+                        val verifiedTotal = contactDao.getTotalCount()
+                        _statusMessage.value = "تم استخراج وحفظ ${summary.importedCount} رقم من ${outcome.filesScanned} ملف في Drive (الإجمالي: $verifiedTotal)"
                     }
                 }.onFailure { err ->
                     _statusMessage.value = "خطأ Google Drive: ${err.localizedMessage}"
@@ -1421,17 +1450,24 @@ class RabtaViewModel(
     }
 
     fun importFromUri(uri: Uri, fileName: String?, uploadToCloud: Boolean = true) {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
-            _importProgressText.value = "جاري تحليل الملف المعزول..."
+            val cleanTitle = fileName?.substringAfterLast('/')?.substringBeforeLast('.')?.takeIf { it.isNotBlank() } ?: "ملف مستورد"
+            _importProgressText.value = "جاري قراءة وتحليل ($cleanTitle)..."
             try {
                 val parsed = withContext(Dispatchers.IO) {
-                    appContext.contentResolver.openInputStream(uri)?.use { stream ->
-                        val text = stream.bufferedReader().readText()
-                        val trimmed = text.trimStart()
+                    appContext.contentResolver.openInputStream(uri)?.use { rawStream ->
+                        val buffered = BufferedInputStream(rawStream, 32 * 1024)
+                        buffered.mark(8192)
+                        val probe = ByteArray(4096)
+                        val probeLen = buffered.read(probe).coerceAtLeast(0)
+                        buffered.reset()
+                        val head = String(probe, 0, probeLen, StandardCharsets.UTF_8).trimStart('\uFEFF', ' ', '\n', '\r', '\t')
                         val looksJson = (fileName?.endsWith(".json", ignoreCase = true) == true) ||
-                            trimmed.startsWith("{") || trimmed.startsWith("[")
+                            head.startsWith("{") || head.startsWith("[")
                         if (looksJson) {
+                            val text = buffered.bufferedReader(StandardCharsets.UTF_8).readText()
                             val jsonContacts = JsonContactExporter.parseFromJson(text).getOrElse { emptyList() }
                             if (jsonContacts.isNotEmpty()) {
                                 val cats = LinkedHashSet<String>()
@@ -1440,10 +1476,23 @@ class RabtaViewModel(
                                 }
                                 CsvParser.ParsedDataset(jsonContacts, 0, cats)
                             } else {
-                                CsvParser.parseArbitrarySheetOrText(text, fileName ?: "ملف مستورد")
+                                CsvParser.parseArbitrarySheetOrText(text, cleanTitle)
                             }
                         } else {
-                            CsvParser.parseArbitrarySheetOrText(text, fileName ?: "ملف مستورد")
+                            val streamParsed = CsvParser.parseStreamAuto(
+                                inputStream = buffered,
+                                sourceTitle = cleanTitle,
+                                skipEnrich = true,
+                            )
+                            if (streamParsed.contacts.isNotEmpty()) {
+                                streamParsed
+                            } else {
+                                // Fallback for messy plain-text dumps with no CSV delimiters
+                                appContext.contentResolver.openInputStream(uri)?.use { retryStream ->
+                                    val rawText = retryStream.bufferedReader(StandardCharsets.UTF_8).readText()
+                                    CsvParser.parseArbitrarySheetOrText(rawText, cleanTitle)
+                                } ?: streamParsed
+                            }
                         }
                     } ?: CsvParser.ParsedDataset(emptyList(), 0, emptySet())
                 }
@@ -1451,7 +1500,8 @@ class RabtaViewModel(
                     _statusMessage.value = "لم يتم العثور على جهات اتصال صالحة في الملف"
                 } else {
                     val result = persistImportedDataset(parsed.contacts, parsed.categoryPaths, uploadToCloud)
-                    _statusMessage.value = "تم استيراد ${result.importedCount} جهة اتصال داخل القاعدة المعزولة بنجاح"
+                    val verifiedTotal = contactDao.getTotalCount()
+                    _statusMessage.value = "تم حفظ ${result.importedCount} جهة اتصال (إجمالي قاعدتك الآن: $verifiedTotal) وجاري الرفع السريع للسحابة"
                 }
             } catch (e: Exception) {
                 _statusMessage.value = "تعذر قراءة الملف: ${e.localizedMessage}"
@@ -1464,15 +1514,7 @@ class RabtaViewModel(
 
     fun scanDuplicateClusters() {
         viewModelScope.launch(Dispatchers.IO) {
-            val total = contactDao.getTotalCount()
-            val allDomains = ArrayList<ContactRecord>(total)
-            var offset = 0
-            while (true) {
-                val page = contactDao.getRecentOrAllPage(limit = 1000, offset = offset)
-                if (page.isEmpty()) break
-                page.forEach { allDomains += it.toDomain() }
-                offset += page.size
-            }
+            val allDomains = loadAllContactsPaged()
             _duplicateClusters.value = ContactDeduplicator.findDuplicateClusters(allDomains)
         }
     }
@@ -1506,21 +1548,13 @@ class RabtaViewModel(
      * normalization + searchable bilingual tags across ALL stored contacts.
      */
     fun reorganizeAllCategories() {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
             _importProgressText.value = "جاري فحص ودمج كل الأسماء المكررة، توحيد English/العربي، وبناء التاجز..."
             try {
                 val outcome = withContext(Dispatchers.IO) {
-                    val total = contactDao.getTotalCount()
-                    val allDomains = ArrayList<ContactRecord>(total)
-                    var offset = 0
-                    val pageSize = 1000
-                    while (true) {
-                        val page = contactDao.getRecentOrAllPage(limit = pageSize, offset = offset)
-                        if (page.isEmpty()) break
-                        page.forEach { allDomains += it.toDomain() }
-                        offset += page.size
-                    }
+                    val allDomains = loadAllContactsPaged()
 
                     val dedup = ContactDeduplicator.deduplicateAndMerge(allDomains, enforceBilingual = true)
                     val allCatPaths = LinkedHashSet<String>()
@@ -1535,12 +1569,16 @@ class RabtaViewModel(
                     contactDao.clearAll()
                     categoryDao.clearAll()
 
-                    syncEngine.saveContactsBatchLocalFirst(
+                    syncEngine.saveContactsBatchChunkedLocalFirst(
                         contacts = dedup.mergedContacts,
                         categories = catNodes,
                         supersededIds = dedup.supersededIds,
                         syncToCloud = true,
-                    )
+                        chunkSize = 500,
+                    ) { saved, total ->
+                        _importProgressText.value = "جاري حفظ التنظيم الجديد: $saved / $total..."
+                    }
+                    dialpadCacheUpdatedMs = 0L
                     Triple(dedup, catNodes, mergedCount)
                 }
 
@@ -1563,25 +1601,39 @@ class RabtaViewModel(
         catPaths: Set<String>,
         uploadToCloud: Boolean,
     ): CsvImportSummary {
-        _importProgressText.value = "منع التكرار وفهرسة ${contacts.size} جهة اتصال باللغتين والتاجز..."
+        _importProgressText.value = "جاري فحص التكرار لـ ${contacts.size} جهة اتصال..."
 
-        val (finalMerged, supersededIds, allCats) = withContext(Dispatchers.IO) {
-            // 1) Deduplicate incoming batch internally
-            val internalDedup = ContactDeduplicator.deduplicateAndMerge(contacts, enforceBilingual = true)
-            val incomingKeys = internalDedup.mergedContacts
-                .flatMap { c -> (listOf(c.primaryPhone) + c.phones).map { PhoneUtils.phoneSearchKey(it) } }
-                .filter { it.length >= 7 }
-                .distinct()
+        val (finalMerged, supersededIds, allCats) = withContext(Dispatchers.Default) {
+            // Collect phone keys directly from incoming batch in a single fast pass
+            val incomingKeys = HashSet<String>(contacts.size)
+            for (c in contacts) {
+                val pk = PhoneUtils.phoneSearchKey(c.primaryPhone)
+                if (pk.length >= 7) incomingKeys += pk
+                for (p in c.phones) {
+                    val k = PhoneUtils.phoneSearchKey(p)
+                    if (k.length >= 7) incomingKeys += k
+                }
+            }
 
-            // 2) Pull any existing contacts in Room that share phone keys to merge instead of duplicate
-            val existingMatched = if (incomingKeys.isNotEmpty()) {
-                incomingKeys.chunked(450).flatMap { chunk ->
-                    contactDao.findAllByPhoneKeys(chunk).map { it.contact.toDomain() }
-                }.distinctBy { it.id }
-            } else emptyList()
+            // Pull only existing Room contacts that share a phone key so we merge cleanly without duplicates
+            val existingMatched = withContext(Dispatchers.IO) {
+                if (incomingKeys.isNotEmpty()) {
+                    val found = LinkedHashMap<String, ContactRecord>()
+                    for (chunk in incomingKeys.chunked(450)) {
+                        for (match in contactDao.findAllByPhoneKeys(chunk)) {
+                            found.putIfAbsent(match.contact.id, match.contact.toDomain())
+                        }
+                    }
+                    found.values.toList()
+                } else {
+                    emptyList()
+                }
+            }
 
+            _importProgressText.value = "جاري دمج وفهرسة ${contacts.size} جهة اتصال باللغتين والتاجز..."
+            // Single-pass dedup + bilingual enrichment (eliminates 3x redundant passes on 16k+ files)
             val fullDedup = ContactDeduplicator.deduplicateAndMerge(
-                existingMatched + internalDedup.mergedContacts,
+                existingMatched + contacts,
                 enforceBilingual = true,
             )
 
@@ -1595,22 +1647,27 @@ class RabtaViewModel(
         val entitiesCount = finalMerged.size
         val catNodes = buildCategoryNodes(allCats)
 
-        syncEngine.saveContactsBatchLocalFirst(
+        _importProgressText.value = "جاري حفظ الجهات محلياً: 0 / $entitiesCount..."
+        syncEngine.saveContactsBatchChunkedLocalFirst(
             contacts = finalMerged,
             categories = catNodes,
             supersededIds = supersededIds,
             syncToCloud = uploadToCloud,
-        )
+            chunkSize = 500,
+        ) { savedSoFar, total ->
+            _importProgressText.value = "جاري حفظ الجهات محلياً: $savedSoFar / $total..."
+        }
+        dialpadCacheUpdatedMs = 0L
 
         loadCategoryLevel(_currentCategoryPath.value)
         refreshCallLogs()
-        viewModelScope.launch { RabtaWidget.refreshAll(appContext) }
+        bulkWorkScope.launch { RabtaWidget.refreshAll(appContext) }
 
         if (uploadToCloud && finalMerged.isNotEmpty()) {
             cloudUploadJob?.cancel()
-            cloudUploadJob = viewModelScope.launch {
-                _cloudSyncStatus.value = "مزامنة ثنائية الاتجاه في الخلفية..."
-                syncEngine.syncNow(currentUserId)
+            cloudUploadJob = bulkWorkScope.launch {
+                _cloudSyncStatus.value = "جاري الرفع السريع للسحابة..."
+                syncEngine.syncNow(currentUserId, resetFailed = false)
                 _cloudSyncStatus.value = null
             }
         }
@@ -1624,7 +1681,8 @@ class RabtaViewModel(
     }
 
     fun pullAllFromCloud() {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
             _importProgressText.value = "جاري جلب جهات الاتصال من Firestore بدون تكرار..."
             try {
@@ -1646,18 +1704,8 @@ class RabtaViewModel(
                 }
 
                 _importProgressText.value = "دمج ومنع تكرار ${pulledAll.size} جهة مع قاعدة البيانات..."
-                val (mergedAll, supersededIds, catNodes) = withContext(Dispatchers.IO) {
-                    val existingTotal = contactDao.getTotalCount()
-                    val existingAll = ArrayList<ContactRecord>(existingTotal)
-                    var offset = 0
-                    val pageSize = 1000
-                    while (true) {
-                        val localPage = contactDao.getRecentOrAllPage(limit = pageSize, offset = offset)
-                        if (localPage.isEmpty()) break
-                        localPage.forEach { existingAll += it.toDomain() }
-                        offset += localPage.size
-                    }
-
+                val (mergedAll, supersededIds, dupRemoved) = withContext(Dispatchers.Default) {
+                    val existingAll = loadAllContactsPaged()
                     val dedup = ContactDeduplicator.deduplicateAndMerge(
                         existingAll + pulledAll,
                         enforceBilingual = true,
@@ -1667,32 +1715,30 @@ class RabtaViewModel(
                         c.categoryPaths.forEach { CsvParser.addHierarchySegments(it, catSet) }
                     }
                     val builtCats = buildCategoryNodes(catSet)
-                    val catEntities = builtCats.map {
-                        CategoryEntity(it.id, it.name, it.parentPath, it.fullPath, it.depth.toInt(), it.iconKey)
-                    }
-                    val mergedEntities = dedup.mergedContacts.map { ContactEntity.fromDomain(it) }
 
-                    if (dedup.supersededIds.isNotEmpty()) {
-                        contactDao.deleteContactsWithIndexes(dedup.supersededIds)
+                    syncEngine.saveContactsBatchChunkedLocalFirst(
+                        contacts = dedup.mergedContacts,
+                        categories = builtCats,
+                        supersededIds = dedup.supersededIds,
+                        syncToCloud = false,
+                        chunkSize = 500,
+                    ) { saved, total ->
+                        _importProgressText.value = "جاري حفظ بيانات السحابة محلياً: $saved / $total..."
                     }
-                    contactDao.upsertBatchWithIndexes(
-                        contacts = mergedEntities,
-                        catEntities = catEntities,
-                        categoryDao = categoryDao,
-                    )
+                    dialpadCacheUpdatedMs = 0L
                     Triple(dedup.mergedContacts, dedup.supersededIds, dedup.totalDuplicatesRemoved)
                 }
 
                 if (supersededIds.isNotEmpty()) {
-                    launch { firestoreRepo.batchDeleteContacts(currentUserId, supersededIds) }
+                    bulkWorkScope.launch { firestoreRepo.batchDeleteContacts(currentUserId, supersededIds) }
                 }
 
                 prefs.setLastSyncMs(System.currentTimeMillis())
                 loadCategoryLevel(_currentCategoryPath.value)
                 refreshCallLogs()
-                launch { RabtaWidget.refreshAll(appContext) }
-                _statusMessage.value = if (catNodes > 0) {
-                    "تمت المزامنة بدون تكرار: ${mergedAll.size} جهة (ودمج $catNodes مكرر تلقائياً)"
+                bulkWorkScope.launch { RabtaWidget.refreshAll(appContext) }
+                _statusMessage.value = if (dupRemoved > 0) {
+                    "تمت المزامنة بدون تكرار: ${mergedAll.size} جهة (ودمج $dupRemoved مكرر تلقائياً)"
                 } else {
                     "تمت المزامنة: ${mergedAll.size} جهة اتصال"
                 }
@@ -2193,12 +2239,12 @@ class RabtaViewModel(
     }
 
     fun syncGoogleContactsPhotos(accessToken: String) {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             _isBusy.value = true
+            _importProgressText.value = "جاري سحب صور جهات الاتصال من Google Contacts..."
             try {
-                val existing = withContext(Dispatchers.IO) {
-                    contactDao.getRecentOrAllPage(limit = 5000, offset = 0).map { it.toDomain() }
-                }
+                val existing = loadAllContactsPaged()
                 if (existing.isEmpty()) {
                     _statusMessage.value = "لا توجد جهات اتصال محفوظة داخل التطبيق لتحديث صورها"
                     return@launch
@@ -2217,7 +2263,7 @@ class RabtaViewModel(
                         val path = syncRes.photoUpdatesByContactId[c.id] ?: return@mapNotNull null
                         c.copy(photoUri = path)
                     }
-                    syncEngine.saveContactsBatchLocalFirst(
+                    syncEngine.saveContactsBatchChunkedLocalFirst(
                         contacts = updatedList,
                         categories = emptyList(),
                         syncToCloud = false,
@@ -2229,21 +2275,22 @@ class RabtaViewModel(
                 }
             } finally {
                 _isBusy.value = false
+                _importProgressText.value = null
             }
         }
     }
 
     fun syncDeviceContactsPhotosOnly() {
-        viewModelScope.launch {
+        if (_isBusy.value) return
+        bulkWorkScope.launch {
             if (!deviceContactsManager.hasReadPermission()) {
                 _statusMessage.value = "يلزم منح صلاحية قراءة جهات الاتصال لسحب الصور"
                 return@launch
             }
             _isBusy.value = true
+            _importProgressText.value = "جاري سحب صور جهات الاتصال من الهاتف..."
             try {
-                val existing = withContext(Dispatchers.IO) {
-                    contactDao.getRecentOrAllPage(limit = 5000, offset = 0).map { it.toDomain() }
-                }
+                val existing = loadAllContactsPaged()
                 val photoRes = deviceContactsManager.readDevicePhotosByPhoneKey()
                 photoRes.onSuccess { map ->
                     if (map.isEmpty()) {
@@ -2259,7 +2306,7 @@ class RabtaViewModel(
                         contact.copy(photoUri = foundPhoto)
                     }
                     if (updated.isNotEmpty()) {
-                        syncEngine.saveContactsBatchLocalFirst(updated, emptyList(), syncToCloud = false)
+                        syncEngine.saveContactsBatchChunkedLocalFirst(updated, emptyList(), syncToCloud = false)
                         dialpadCacheUpdatedMs = 0L
                     }
                     _statusMessage.value = "تم تحديث صور ${updated.size} جهة اتصال من الهاتف مع بقاء العزل الكامل"
@@ -2268,6 +2315,7 @@ class RabtaViewModel(
                 }
             } finally {
                 _isBusy.value = false
+                _importProgressText.value = null
             }
         }
     }

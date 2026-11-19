@@ -520,6 +520,38 @@ internal fun SyncCacheSettingsPage(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (syncEngineState.status == SyncStatusBadge.SYNCING) {
+                        val totalRun = syncEngineState.totalInCurrentRun
+                        val syncedRun = syncEngineState.syncedInCurrentRun
+                        if (totalRun > 0) {
+                            LinearProgressIndicator(
+                                progress = { (syncedRun.toFloat() / totalRun.toFloat()).coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth().testTag("sync_live_progress_bar"),
+                            )
+                        } else {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth().testTag("sync_live_progress_bar"),
+                            )
+                        }
+                        Text(
+                            text = syncEngineState.progressMessage
+                                ?: if (totalRun > 0) {
+                                    "جاري الرفع السريع: $syncedRun / $totalRun • متبقي: ${syncEngineState.pendingCount}"
+                                } else {
+                                    "جاري المزامنة السريعة مع السحابة..."
+                                },
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (syncEngineState.failedCount > 0) {
+                        Text(
+                            text = "تعذر رفع ${syncEngineState.failedCount} عنصر بعد عدة محاولات — اضغط \"مزامنة الآن\" لإعادة المحاولة.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
                     syncEngineState.lastError?.takeIf { it.isNotBlank() }?.let { err ->
                         Text(
                             text = "آخر ملاحظة مزامنة: $err",
@@ -535,7 +567,14 @@ internal fun SyncCacheSettingsPage(
                         ) {
                             Icon(Icons.Rounded.CloudSync, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("مزامنة الآن", maxLines = 1)
+                            Text(
+                                text = when {
+                                    syncEngineState.status == SyncStatusBadge.SYNCING -> "جاري الرفع..."
+                                    syncEngineState.failedCount > 0 -> "إعادة المحاولة (${syncEngineState.failedCount})"
+                                    else -> "مزامنة الآن"
+                                },
+                                maxLines = 1,
+                            )
                         }
                         OutlinedButton(
                             onClick = onPurgeOrphanedCache,

@@ -59,24 +59,27 @@ data class ContactRecord(
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
     fun toFirestoreMap(isCreate: Boolean): Map<String, Any> = buildMap {
-        put("displayName", displayName.ifBlank { primaryPhone.ifBlank { "Unnamed" } }.take(200))
-        nickname?.takeIf { it.isNotBlank() }?.let { put("nickname", it.take(250)) }
-        put("primaryPhone", primaryPhone.take(60))
-        put("phones", phones.distinct().take(10))
-        put("emails", emails.distinct().take(5))
-        put("categoryPaths", categoryPaths.distinct().take(15))
-        put("tags", tags.distinct().take(20))
-        organization?.takeIf { it.isNotBlank() }?.let { put("organization", it.take(200)) }
-        jobTitle?.takeIf { it.isNotBlank() }?.let { put("jobTitle", it.take(160)) }
-        notes?.takeIf { it.isNotBlank() }?.let { put("notes", it.take(4000)) }
-        address?.takeIf { it.isNotBlank() }?.let { put("address", it.take(400)) }
-        district?.takeIf { it.isNotBlank() }?.let { put("district", it.take(120)) }
-        if (latitude != null && longitude != null && latitude in -90.0..90.0 && longitude in -180.0..180.0) {
+        put("displayName", displayName.trim().ifBlank { primaryPhone.trim().ifBlank { "Unnamed" } }.take(200))
+        nickname?.trim()?.takeIf { it.isNotBlank() }?.let { put("nickname", it.take(250)) }
+        put("primaryPhone", primaryPhone.trim().take(60))
+        put("phones", phones.map { it.trim().take(60) }.filter { it.isNotBlank() }.distinct().take(10))
+        put("emails", emails.map { it.trim().take(180) }.filter { it.isNotBlank() }.distinct().take(5))
+        put("categoryPaths", categoryPaths.map { it.trim().take(400) }.filter { it.isNotBlank() }.distinct().take(15))
+        put("tags", tags.map { it.trim().take(100) }.filter { it.isNotBlank() }.distinct().take(20))
+        organization?.trim()?.takeIf { it.isNotBlank() }?.let { put("organization", it.take(200)) }
+        jobTitle?.trim()?.takeIf { it.isNotBlank() }?.let { put("jobTitle", it.take(160)) }
+        notes?.trim()?.takeIf { it.isNotBlank() }?.let { put("notes", it.take(4000)) }
+        address?.trim()?.takeIf { it.isNotBlank() }?.let { put("address", it.take(400)) }
+        district?.trim()?.takeIf { it.isNotBlank() }?.let { put("district", it.take(120)) }
+        if (latitude != null && longitude != null &&
+            latitude.isFinite() && longitude.isFinite() &&
+            latitude in -90.0..90.0 && longitude in -180.0..180.0
+        ) {
             put("latitude", latitude)
             put("longitude", longitude)
         }
-        telegramHandle?.takeIf { it.isNotBlank() }?.let { put("telegramHandle", it.take(100)) }
-        website?.takeIf { it.isNotBlank() }?.let { put("website", it.take(400)) }
+        telegramHandle?.trim()?.takeIf { it.isNotBlank() }?.let { put("telegramHandle", it.take(100)) }
+        website?.trim()?.takeIf { it.isNotBlank() }?.let { put("website", it.take(400)) }
         // Sandbox isolation: contacts inside this app NEVER sync to the device's system phonebook
         put("syncedToDevice", false)
         put("isFavorite", isFavorite)
@@ -106,11 +109,11 @@ data class CategoryNode(
     @ServerTimestamp val updatedAt: Timestamp? = null,
 ) {
     fun toFirestoreMap(isCreate: Boolean): Map<String, Any> = buildMap {
-        put("name", name.ifBlank { "Category" }.take(120))
-        put("parentPath", parentPath.take(300))
-        put("fullPath", fullPath.ifBlank { name }.take(400))
+        put("name", name.trim().ifBlank { "Category" }.take(120))
+        put("parentPath", parentPath.trim().take(300))
+        put("fullPath", fullPath.trim().ifBlank { name.trim().ifBlank { "Category" } }.take(400))
         put("depth", depth.coerceIn(0L, 10L))
-        iconKey?.takeIf { it.isNotBlank() }?.let { put("iconKey", it.take(60)) }
+        iconKey?.trim()?.takeIf { it.isNotBlank() }?.let { put("iconKey", it.take(60)) }
         if (isCreate) {
             put("createdAt", FieldValue.serverTimestamp())
         } else if (createdAt != null) {

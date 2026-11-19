@@ -58,9 +58,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -90,7 +90,9 @@ import com.example.ui.components.PhoneNumberContextActionsSheet
 import com.example.ui.components.TranscriptContextActionsSheet
 import com.example.ui.theme.ErrorRed
 import com.example.util.SystemIntents
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -158,25 +160,41 @@ fun ContactsScreen(
     var contextTranscriptTarget by remember { mutableStateOf<CallTranscriptRecord?>(null) }
     var contextCallTarget by remember { mutableStateOf<CallLogEntry?>(null) }
 
-    val availableTags = remember(allContacts) {
-        allContacts
-            .flatMap { c -> c.tags + c.categoryPaths.map { it.substringBefore(" > ").trim() } }
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-            .groupingBy { it }
-            .eachCount()
-            .entries
-            .sortedByDescending { it.value }
-            .take(10)
-            .map { it.key }
+    val availableTags by produceState<List<String>>(initialValue = emptyList(), allContacts) {
+        value = withContext(Dispatchers.Default) {
+            val counts = HashMap<String, Int>(64)
+            for (c in allContacts) {
+                for (t in c.tags) {
+                    val trimmed = t.trim()
+                    if (trimmed.isNotBlank()) counts[trimmed] = (counts[trimmed] ?: 0) + 1
+                }
+                for (p in c.categoryPaths) {
+                    val top = p.substringBefore(" > ").trim()
+                    if (top.isNotBlank()) counts[top] = (counts[top] ?: 0) + 1
+                }
+            }
+            counts.entries
+                .sortedByDescending { it.value }
+                .take(10)
+                .map { it.key }
+        }
     }
 
-    val filteredContacts by remember(allContacts, favorites, filterMode, selectedTag) {
-        derivedStateOf {
-            val base = when {
-                selectedTag != null -> allContacts.filter { c ->
-                    c.tags.any { it.equals(selectedTag, ignoreCase = true) } ||
-                        c.categoryPaths.any { it.contains(selectedTag!!, ignoreCase = true) }
+    val filteredContacts by produceState<List<ContactRecord>>(
+        initialValue = emptyList(),
+        allContacts,
+        favorites,
+        filterMode,
+        selectedTag,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            when {
+                selectedTag != null -> {
+                    val tag = selectedTag!!
+                    allContacts.filter { c ->
+                        c.tags.any { it.equals(tag, ignoreCase = true) } ||
+                            c.categoryPaths.any { it.contains(tag, ignoreCase = true) }
+                    }
                 }
                 filterMode == ContactsFilterMode.FAVORITES -> favorites
                 filterMode == ContactsFilterMode.RECENT -> allContacts
@@ -184,22 +202,33 @@ fun ContactsScreen(
                     .take(80)
                 else -> allContacts
             }
-            base
         }
     }
 
-    val groupedAlphabetical = remember(filteredContacts, filterMode, selectedTag) {
-        if (filterMode == ContactsFilterMode.RECENT) {
-            emptyMap()
-        } else {
-            val map = linkedMapOf<String, MutableList<ContactRecord>>()
-            filteredContacts
-                .sortedBy { it.displayName.lowercase(Locale.getDefault()) }
-                .forEach { c ->
+    val groupedAlphabetical by produceState<Map<String, List<ContactRecord>>>(
+        initialValue = emptyMap(),
+        filteredContacts,
+        filterMode,
+        selectedTag,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            if (filterMode == ContactsFilterMode.RECENT) {
+                emptyMap()
+            } else {
+                val locale = Locale.getDefault()
+                val map = linkedMapOf<String, MutableList<ContactRecord>>()
+                val sorted = if (filterMode == ContactsFilterMode.ALL && selectedTag == null) {
+                    // Already ordered COLLATE NOCASE from SQLite; avoid O(N log N) re-sort for 27k+ contacts
+                    filteredContacts
+                } else {
+                    filteredContacts.sortedBy { it.displayName.lowercase(locale) }
+                }
+                for (c in sorted) {
                     val letter = normalizeSectionBucket(c.displayName)
                     map.getOrPut(letter) { mutableListOf() }.add(c)
                 }
-            map
+                map
+            }
         }
     }
 

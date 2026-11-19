@@ -39,6 +39,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -76,6 +77,7 @@ internal fun DataImportSettingsPage(
     totalContacts: Int,
     duplicateClustersCount: Int,
     isBusy: Boolean,
+    importProgressText: String? = null,
     driveErrorMsg: String?,
     onSetDriveErrorMsg: (String?) -> Unit,
     onImportBundledCsv: () -> Unit,
@@ -100,6 +102,42 @@ internal fun DataImportSettingsPage(
     val scope = rememberCoroutineScope()
 
     SettingsSubPageContainer {
+        if (!importProgressText.isNullOrBlank()) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(18.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                    modifier = Modifier.fillMaxWidth().testTag("settings_import_progress_card"),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(
+                                Icons.Rounded.CloudUpload,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                            Text(
+                                text = importProgressText,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            )
+                        }
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text(
+                            text = "يتم الحفظ تلقائياً على دفعات آمنة (500 رقم لكل دفعة) — يمكنك المتابعة دون فقدان أي رقم.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                        )
+                    }
+                }
+            }
+        }
         item {
             Card(
                 shape = RoundedCornerShape(20.dp),

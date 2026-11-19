@@ -31,12 +31,14 @@ class DeviceContactsManager(private val context: Context) {
 
             val namesMap = linkedMapOf<Long, String>()
             val starredSet = hashSetOf<Long>()
+            val hasPhotoSet = hashSetOf<Long>()
             context.contentResolver.query(
                 ContactsContract.Contacts.CONTENT_URI,
                 arrayOf(
                     ContactsContract.Contacts._ID,
                     ContactsContract.Contacts.DISPLAY_NAME_PRIMARY,
                     ContactsContract.Contacts.STARRED,
+                    ContactsContract.Contacts.PHOTO_URI,
                 ),
                 null,
                 null,
@@ -45,11 +47,13 @@ class DeviceContactsManager(private val context: Context) {
                 val idIdx = c.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
                 val nameIdx = c.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME_PRIMARY)
                 val starIdx = c.getColumnIndexOrThrow(ContactsContract.Contacts.STARRED)
+                val photoIdx = c.getColumnIndexOrThrow(ContactsContract.Contacts.PHOTO_URI)
                 while (c.moveToNext()) {
                     val cid = c.getLong(idIdx)
                     val name = c.getString(nameIdx).orEmpty().trim()
                     if (name.isNotBlank()) namesMap[cid] = name
                     if (c.getInt(starIdx) == 1) starredSet += cid
+                    if (!c.getString(photoIdx).isNullOrBlank()) hasPhotoSet += cid
                 }
             }
 
@@ -153,7 +157,11 @@ class DeviceContactsManager(private val context: Context) {
                 val rawLabels = labelsByCid[cid]?.toList().orEmpty() + listOf("الهاتف (مستورد)")
 
                 val detId = ContactDeduplicator.deterministicContactId(phones, emails, displayName)
-                val cachedPhoto = readDeviceContactPhotoPath(cid, detId)
+                val cachedPhoto = if (hasPhotoSet.contains(cid)) {
+                    readDeviceContactPhotoPath(cid, detId)
+                } else {
+                    null
+                }
 
                 val rawRecord = ContactRecord(
                     id = detId,
@@ -171,8 +179,7 @@ class DeviceContactsManager(private val context: Context) {
                     syncedToDevice = false, // Keep isolated inside Felo Contacts unless explicitly flagged
                     isFavorite = starredSet.contains(cid),
                 )
-                val enriched = ContactDeduplicator.enrichSingleContact(rawRecord)
-                enriched.categoryPaths.forEach { cat ->
+                rawRecord.categoryPaths.forEach { cat ->
                     val parts = cat.split(">").map { it.trim() }.filter { it.isNotBlank() }
                     var cur = ""
                     parts.forEach { part ->
@@ -180,7 +187,7 @@ class DeviceContactsManager(private val context: Context) {
                         discoveredCats += cur
                     }
                 }
-                records += enriched
+                records += rawRecord
             }
 
             records to discoveredCats

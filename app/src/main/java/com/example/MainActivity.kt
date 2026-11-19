@@ -826,6 +826,7 @@ private fun AuthenticatedMainScreen(
                                 autoRecordCalls = autoRecordCalls,
                                 callRecordings = callRecordings,
                                 isBusy = isBusy,
+                                importProgressText = importProgress,
                                 selectedSection = activeSettingsSection,
                                 onSelectSection = { activeSettingsSection = it },
                                 showContactPhotos = showContactPhotos,
