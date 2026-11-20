@@ -39,4 +39,12 @@
     <string name="widget_description">اختصار مباشر للوحة الاتصال وآخر المكالمات في Felo Contacts</string>
     <string name="dialpad_title">لوحة الاتصال المباشر</string>
     <string name="ai_assistant_title">مساعد Felo الذكي</string>
+    <string name="auth_update_title">تحديث التطبيق</string>
+    <string name="auth_update_available_badge">تحديث جديد متاح</string>
+    <string name="auth_update_link_label">رابط التحديث أو مستودع GitHub</string>
+    <string name="auth_update_link_placeholder">owner/repo أو رابط APK مباشر</string>
+    <string name="auth_update_download_apk">تحميل التحديث (APK)</string>
+    <string name="auth_update_open_link">فتح رابط التحديث</string>
+    <string name="auth_update_open_releases">صفحة الإصدارات</string>
+    <string name="auth_update_check_action">حفظ وفحص التحديث</string>
 </resources>
